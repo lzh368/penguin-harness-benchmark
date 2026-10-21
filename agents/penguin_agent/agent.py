@@ -670,7 +670,9 @@ class PenguinAgent(BaseInstalledAgent):
             command=(
                 f"mkdir -p {state_dir} && tar -xzf {remote} -C {state_dir} --no-same-owner && "
                 f"rm -f {state_dir}/.vault.toml {remote} && mkdir -p {logs} && "
-                f"(cd {state_dir} && find . -type f | sort) > {logs}/penguin-agent-state.txt"
+                f"(cd {state_dir} && find . -type f | sort) > {logs}/penguin-agent-state.txt && "
+                f"{NODE_DIR}/bin/node {PREFIX}/helper.mjs state-files {state_dir} "
+                f"> {logs}/penguin-agent-state-before.json"
             ),
         )
 

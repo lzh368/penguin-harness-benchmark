@@ -29,6 +29,32 @@
 //       Writes <json> (validated) to <file>.
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+
+// Record bytes actually installed/read by the trial, without retaining State
+// content or opening secrets. Test acceptance compares these hashes to its
+// frozen snapshot; the helper itself does not judge or modify any State.
+function stateFiles(root) {
+  try {
+    const files = {};
+    const visit = (dir, prefix = "") => {
+      for (const item of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const name = prefix + item.name;
+        if (name === ".vault.toml" || name === "memory" || name === "schedule") continue;
+        const full = path.join(dir, item.name);
+        if (item.isSymbolicLink() || (!item.isDirectory() && !item.isFile())) throw new Error("non-regular State entry");
+        if (item.isDirectory()) visit(full, name + "/");
+        else files[name] = crypto.createHash("sha256").update(fs.readFileSync(full)).digest("hex");
+      }
+    };
+    if (fs.lstatSync(root).isSymbolicLink()) throw new Error("linked State");
+    visit(root);
+    out({ schema: "penguin-agent-state-files-v1", state: root, files });
+  } catch {
+    out({ schema: "penguin-agent-state-files-v1", complete: false, error: "State inventory unavailable or contains non-regular entries" });
+    process.exitCode = 1;
+  }
+}
 
 function out(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -377,6 +403,9 @@ function redact(configFile, dir) {
 
 const [command, ...args] = process.argv.slice(2);
 switch (command) {
+  case "state-files":
+    stateFiles(args[0]);
+    break;
   case "now":
     process.stdout.write(`${Date.now()}\n`);
     break;

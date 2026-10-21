@@ -19,7 +19,7 @@
 # Exit status: that of `penguin run` (0 = completed or soft timeout), after the cleanup
 # below has run in every case; 3 when the server never came up, 4 when the requested
 # turn cap could not be set, 5 for work left running after root completion, 6 when
-# native trial work could not be confirmed idle or costs remain unsettled, 7 when
+# native trial work could not be confirmed idle, 7 when
 # graceful process cleanup could not be confirmed.
 set -u
 
@@ -77,6 +77,8 @@ if [ "$SERVER_READY" = true ] && [ -n "${PB_MAX_TURNS:-}" ]; then
   fi
 fi
 if [ "$CONFIG_READY" = true ]; then
+  "$NODE" "$HELPER" state-files "$PENGUIN_HOME/$PB_PROJECT/agents/$PB_AGENT/agent_state" \
+    >"$OUT/penguin-agent-state-ready.json"
   # 2. The Task itself.
   # --source is hidden and ignored in current 0.2.16. Probe the installed CLI
   # without a model call; advertised legacy options keep benchmark provenance.
@@ -137,8 +139,9 @@ if [ "$SERVER_READY" = true ] && [ "$QUIESCENT" = true ]; then
     COST_STATUS="observed_after_native_idle"
   else
     COST_STATUS="unsettled"
-    STATUS="method_failed_unsettled"
-    RUN_RC=6
+    # Pricing/accounting failure does not undo a completed scored execution.
+    # Keep its status and reward; the adapter exposes null cost and the host
+    # retains the reservation until a later read-only accounting pass settles it.
   fi
 fi
 
@@ -165,6 +168,10 @@ wait "$SERVER_PID" 2>/dev/null
 
 # 6. Keep the Traces and server logs, never the config: the data root stays outside /logs.
 PROJECT_DIR="$PENGUIN_HOME/$PB_PROJECT"
+"$NODE" "$HELPER" state-files "$PROJECT_DIR/agents/$PB_AGENT/agent_state" \
+  >"$OUT/penguin-agent-state-after.json"
+# Evidence failure is retained; method acceptance must not claim verified State
+# injection from a missing/partial record. The original verifier still scores.
 for TRACES in "$PROJECT_DIR"/agents/*/traces; do
   [ -d "$TRACES" ] || continue
   AGENT_NAME="$(basename "$(dirname "$TRACES")")"

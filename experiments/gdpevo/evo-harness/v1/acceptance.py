@@ -49,6 +49,26 @@ def config_version(raw):
     return version, "".join(remaining).encode("utf-8")
 
 
+def verify_output_budget(raw, max_bytes):
+    """Native emitter syntax, not an inferred/default command output limit.
+
+    A UTF-8 byte may require six JSON escape characters. Preserve the method's
+    16000-byte selection budget and reserve room for hashes and receipt keys.
+    Both foreground and resumed command output must carry that full receipt.
+    """
+    text = raw.decode()
+    require(re.findall(r"(?m)^max_turns: (-?\d+)$", text) == ["-1"], "freeze native max_turns: -1 before transport")
+    require("tools:\n  builtin:\n" in text, "initialize the full native builtin tool configuration")
+    required = 6 * max_bytes + 8192
+    for name in ("exec_command", "input_command"):
+        blocks = re.findall(r"(?m)^    - name: " + name + r"\n((?:(?!    - name:|  [A-Za-z_]|\S).*(?:\n|$))*)", text)
+        require(len(blocks) == 1, "missing/duplicate native command output configuration")
+        values = re.findall(r"(?m)^      maxOutputLength: ([0-9]+)$", blocks[0])
+        require(len(values) == 1 and int(values[0]) >= required,
+                f"native {name} maxOutputLength must be at least {required} for complete selector receipts")
+    return required
+
+
 def snapshot(path):
     """Read regular files only; never extract an archive-controlled path."""
     try:
@@ -134,6 +154,8 @@ def verify_freeze(req, verify_export, evo):
     require(final_package == exported, "final snapshot learned slot differs from verified export")
     h0_index = json.loads(h0["files"][SLOT + "/index.json"])
     final_index = json.loads(final["files"][SLOT + "/index.json"])
+    for state in (h0, final):
+        verify_output_budget(state["files"]["system_config.yaml"], h0_index["max_bytes"])
     require(all(h0_index[key] == final_index[key] for key in ("max_entries", "max_bytes")),
             "selection budgets must remain frozen between H0 and final")
     def outside_slot(files):

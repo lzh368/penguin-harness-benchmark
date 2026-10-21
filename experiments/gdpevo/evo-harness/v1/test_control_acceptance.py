@@ -15,30 +15,39 @@ import unittest
 
 import protocol
 import test_protocol
+import test_registration
+import test_injection
+import acceptance
 
 
 class ControllerAcceptanceTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="synthetic-controller-acceptance-")
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        registration = test_registration.RegistrationTests("test_native_roster_complete_launch_and_full_runtime")
+        self.addCleanup(registration.doCleanups)
+        registration.setUp()
+        self.root = registration.root
         self.tool = Path(os.environ["EVO_TOOL"]).resolve()
         sys.path.insert(0, str(self.tool.parent))
         self.addCleanup(lambda: sys.path.remove(str(self.tool.parent)))
         spec = importlib.util.spec_from_file_location("synthetic_control_acceptance", self.tool.with_name("control.py"))
         self.control = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.control)
-        self.runtime = {"provider": "synthetic", "model_id": "no-model", "thinking_level": "high"}
+        self.runtime = {**registration.config["runtime"], "provider": "synthetic", "thinking_level": "high"}
         self.config_path = self.root / "synthetic-config.json"
-        self.config = {**protocol.read(Path(__file__).with_name("profile.json")),
+        self.config = {**registration.config,
             "synthetic": True, "paid_authorized": True, "budget_usd": 2, "runtime": self.runtime,
             "benchmark_id": "synthetic-training-benchmark", "test_benchmark_id": "synthetic-test-benchmark",
             "trainer_agent_id": "synthetic-trainer", "test_agent_id": "synthetic-target",
-            "deployment": {"penguin_home": str(self.root / "penguin"), "project_id": "synthetic-project",
-                           "benchmark_checkout": str(Path(__file__).resolve().parents[4])}}
+            "deployment": registration.config["deployment"]}
+        registration.preflight["pins"]["provider"] = self.runtime["provider"]
+        registration.save_preflight()
         self.save(self.config_path, self.config)
+        self.registration_request = {**registration.req, "config": str(self.config_path), "config_sha256": protocol.sha(self.config_path)}
+        self.registered = protocol.execute(self.registration_request)
+        self.test_cases = self.registered["test"]["case_ids"]
         fixture = test_protocol.ExportEvidenceTests("test_sealed_five_task_export_survives_relocation_using_original_traces")
-        fixture.all_success = True
+        fixture.all_success = getattr(self, "all_success", True)
+        fixture.frozen_runtime = self.runtime
         fixture.config_sha256 = protocol.sha(self.config_path)
         self.addCleanup(fixture.doCleanups)
         fixture.setUp()
@@ -51,13 +60,22 @@ class ControllerAcceptanceTests(unittest.TestCase):
         self.target = agents / "synthetic-target/agent_state"
         self.target.mkdir(parents=True)
         shutil.copytree(fixture.submission / "skill", self.target / "skills/evo-harness-learned")
-        (self.target / "system_config.yaml").write_text("version: 1\nsystem_prompt: SYNTHETIC frozen target\nhooks:\n  enabled: false\n")
+        (self.target / "system_config.yaml").write_text("version: 1\nsystem_prompt: SYNTHETIC frozen target\nhooks:\n  enabled: false\n" + test_protocol.SYNTHETIC_OUTPUT_TOOLS)
         (self.target / "AGENTS.md").write_text("SYNTHETIC fixed target instructions\n")
         self.h0 = self.root / "h0.tar.gz"
         self.final = self.root / "final.tar.gz"
-        for archive in (self.h0, self.final):
-            with tarfile.open(archive, "w:gz") as handle:
-                handle.add(self.target, arcname="agent_state")
+        self.final_version = 1 if fixture.all_success else 2
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            h0_state = Path(temporary) / "agent_state"
+            shutil.copytree(self.target, h0_state)
+            if not fixture.all_success:
+                shutil.rmtree(h0_state / "skills/evo-harness-learned")
+                self.evo.export_skill({"library": str(fixture.library), "limits": fixture.limits,
+                    "max_entries": 5, "max_bytes": 16000, "output": str(h0_state / "skills/evo-harness-learned")})
+                (self.target / "system_config.yaml").write_text((self.target / "system_config.yaml").read_text().replace("version: 1", "version: 2"))
+            for archive, state in ((self.h0, h0_state), (self.final, self.target)):
+                with tarfile.open(archive, "w:gz") as handle:
+                    handle.add(state, arcname="agent_state")
         self.scratch = self.state.parent / "scratchpad/synthetic-controller"
         self.scratch.mkdir(parents=True)
         self.trace = self.state.parent / "traces/synthetic-controller.jsonl"
@@ -70,6 +88,7 @@ class ControllerAcceptanceTests(unittest.TestCase):
             "config": str(self.config_path), "config_sha256": protocol.sha(self.config_path),
             "protocol": str(source), "protocol_sha256": protocol.sha(source),
             "acceptance_sha256": protocol.sha(source.with_name("acceptance.py")),
+            "support_sha256": {name: protocol.sha(source.with_name(name)) for name in ("registration.py", "injection.py")},
             "freeze_request": str(self.scratch / "evo-guard/freeze-request.json"),
             "completion_request": str(self.scratch / "evo-guard/completion-request.json")}
         self.save(self.scratch / self.control.MARKER, self.mode)
@@ -78,14 +97,17 @@ class ControllerAcceptanceTests(unittest.TestCase):
             "training_export": str(fixture.record_path), "train_ids": fixture.train,
             "private_learning": str(fixture.private), "trace_root": str(fixture.traces), "runtime": self.runtime})
         self.save(Path(self.mode["freeze_request"]), {"evo_tool": str(self.tool), "export_request": str(exported),
-            "h0_snapshot": str(self.h0), "final_snapshot": str(self.final), "h0_version": 1, "final_version": 1,
-            "target_state": str(self.target), "test_case_ids": self.config["test_ids"], "runtime": self.runtime})
+            "h0_snapshot": str(self.h0), "final_snapshot": str(self.final), "h0_version": 1, "final_version": self.final_version,
+            "target_state": str(self.target), "test_case_ids": self.test_cases, "runtime": self.runtime})
         self.identity = {"agent_id": "synthetic-target", "expected_version": 1, **self.runtime}
         self.cells = [{"protocol_version": 1, **self.identity, "case_id": task, "run": 1, "status": "ok",
-            "score": 50, "cost": 0, "duration_ms": 1, "session_id": f"synthetic-test-{i}"}
-            for i, task in enumerate(self.config["test_ids"])]
+            "score": 50, "cost": 0, "duration_ms": 1, "session_id": f"harbor:synthetic-test-{i}"}
+            for i, task in enumerate(self.test_cases)]
+        self.benchmark = Path(self.config["deployment"]["penguin_home"]) / self.config["deployment"]["project_id"] / "benchmarks" / self.config["test_benchmark_id"]
+        for cell in self.cells:
+            test_injection.write_trial(self.benchmark, cell, acceptance.snapshot(self.h0)["files"], self.runtime)
         cells = self.save(self.root / "synthetic-cells.json", self.cells)
-        self.matrix = {"evo_tool": str(self.tool), "cells": str(cells), "case_ids": self.config["test_ids"],
+        self.matrix = {"evo_tool": str(self.tool), "cells": str(cells), "case_ids": self.test_cases,
             "runs": 1, "identity": self.identity, "time": "2026-10-21T00:00:00Z",
             "summary_title": "SYNTHETIC", "summary": "Constant fixtures, not benchmark scores"}
         self.matrix_path = self.save(self.scratch / "evo-guard/h0-matrix-request.json", self.matrix)
@@ -116,14 +138,14 @@ class ControllerAcceptanceTests(unittest.TestCase):
         self.evo.journal({**common, "action": "init", "budget_usd": 2, "controller_session_id": self.meta["session_id"]})
         reserve = {**common, "action": "reserve", "controller_trace": str(self.trace), "role": "synthetic", "reserve_usd": 0.1}
         self.evo.journal({**reserve, "operation_id": "controller", "slot": "controller", "request_sha256": "synthetic-controller"})
-        for i, task in enumerate(self.config["test_ids"]):
+        for i, task in enumerate(self.test_cases):
             call = self.call(task)
             ticket = self.control.worker_request({"phase": "h0", "call": call}, self.scratch, self.mode)
             self.evo.journal({**reserve, **{key: ticket[key] for key in ("operation_id", "slot", "request_sha256")}})
             result = self.hook("pre_tool_use", tool_name="run_subagent", arguments=json.dumps(call), tool_call_id=f"synthetic-call-{i}")
             self.assertEqual(result, {})
         with self.assertRaisesRegex(ValueError, "reuse H0"):
-            self.control.worker_request({"phase": "final", "call": self.call(self.config["test_ids"][0])}, self.scratch, self.mode)
+            self.control.worker_request({"phase": "final", "call": self.call(self.test_cases[0])}, self.scratch, self.mode)
         accepted = self.control.controller_final(self.mode)
         self.assertTrue(accepted["complete"])
         self.assertTrue(accepted["equivalent_h0"])
@@ -140,13 +162,13 @@ class ControllerAcceptanceTests(unittest.TestCase):
             else:
                 self.save(self.f.record_path, {**json.loads(original), "complete": False})
             with self.subTest(missing=missing), self.assertRaises((OSError, ValueError)):
-                self.control.worker_request({"phase": "h0", "call": self.call(self.config["test_ids"][0])}, self.scratch, self.mode)
+                self.control.worker_request({"phase": "h0", "call": self.call(self.test_cases[0])}, self.scratch, self.mode)
             self.save(self.scratch / "GOAL.json", {"status": "complete", "ended": False})
             self.assertEqual(self.hook("stop")["output"]["status"], "method_failed")
             self.assertEqual(protocol.read(self.scratch / "GOAL.json")["status"], "blocked")
 
     def test_worker_and_completion_reject_runtime_changes_without_publishing_success(self):
-        call = self.call(self.config["test_ids"][0])
+        call = self.call(self.test_cases[0])
         with self.assertRaisesRegex(ValueError, "runtime"):
             self.control.worker_request({"phase": "h0", "call": {**call, "thinking_level": "low"}}, self.scratch, self.mode)
         wrong = {**self.identity, "model_id": "synthetic-wrong-model"}
@@ -161,6 +183,31 @@ class ControllerAcceptanceTests(unittest.TestCase):
         self.save(Path(self.mode["completion_request"]), {**self.completion, "host_cost_status": "complete"})
         with self.assertRaisesRegex(ValueError, "pending"):
             self.control.controller_final(self.mode)
+
+    def test_five_failures_reflect_compile_and_two_frozen_matrices_verify_actual_injection(self):
+        fixture = ControllerAcceptanceTests("test_five_h0_calls_authorize_only_after_real_noop_freeze_and_final_is_reused")
+        self.addCleanup(fixture.doCleanups)
+        fixture.all_success = False
+        fixture.setUp()
+        self.assertEqual(len(fixture.f.contexts), 5)
+        self.assertEqual(len([role for role in fixture.f.roles if role["role"] == "reflector"]), 5)
+        self.assertEqual(len(fixture.f.candidates), 5)
+        self.assertFalse(fixture.f.package["empty"])
+        final_cells = [{**cell, "expected_version": 2, "session_id": cell["session_id"] + "-final"}
+                       for cell in fixture.cells]
+        for cell in final_cells:
+            test_injection.write_trial(fixture.benchmark, cell, acceptance.snapshot(fixture.final)["files"], fixture.runtime)
+        final_cells_path = fixture.save(fixture.root / "final-cells.json", final_cells)
+        final_matrix = fixture.save(fixture.scratch / "evo-guard/final-matrix-request.json", {
+            **fixture.matrix, "cells": str(final_cells_path), "identity": {**fixture.identity, "expected_version": 2}})
+        fixture.save(Path(fixture.mode["completion_request"]), {"h0_matrix_request": str(fixture.matrix_path),
+            "final_matrix_request": str(final_matrix), "host_cost_status": "pending_final_request"})
+        accepted = fixture.control.controller_final(fixture.mode)
+        self.assertTrue(accepted["complete"])
+        self.assertFalse(accepted["equivalent_h0"])
+        self.assertEqual(len(accepted["injection"]), 2)
+        self.assertTrue(all(cell["bytes"] == 0 for cell in accepted["injection"][0]["cells"]))
+        self.assertTrue(all(cell["bytes"] > 0 for cell in accepted["injection"][1]["cells"]))
 
 
 if __name__ == "__main__":

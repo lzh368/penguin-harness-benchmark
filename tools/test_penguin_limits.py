@@ -41,6 +41,16 @@ class LimitsTests(unittest.TestCase):
         agent._trial_config = lambda: config
         return agent, config, task
 
+    def test_native_install_record_uses_the_fields_in_evo_injection_acceptance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, _, _ = self.make_agent(Path(tmp), node_version='24.20.0', penguin_version='0.2.16',
+                install_bundle='/synthetic/bundle.tar.gz', agent_state_tar='/synthetic/state.tar.gz')
+            agent._bundle_sha256 = 'a' * 64
+            agent._model_config = {'synthetic': True}
+            record = json.loads(json.dumps(agent._install_record()))
+            self.assertEqual({key: record[key] for key in ('agent_state', 'install', 'bundle_sha256', 'node_version', 'penguin_version')},
+                {'agent_state': 'custom', 'install': 'bundle', 'bundle_sha256': 'a' * 64, 'node_version': '24.20.0', 'penguin_version': '0.2.16'})
+
     def test_unlimited_removes_both_adapter_and_harbor_deadlines(self):
         with tempfile.TemporaryDirectory() as tmp:
             agent, config, task = self.make_agent(Path(tmp))

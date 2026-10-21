@@ -357,11 +357,11 @@ else: raise SystemExit('unexpected CLI command: ' + repr(sys.argv))
                            FIXTURE_QUIESCE_CODE=str(code), FIXTURE_COST_FAILURE=cost_failure)
                 result = subprocess.run(["bash", str(HELPER.with_name("run.sh"))], cwd=root, env=env,
                                         capture_output=True, text=True, timeout=10)
-                expected_code = 7 if cost_failure == 'stop' else 6 if cost_failure else code
+                expected_code = 7 if cost_failure == 'stop' else code
                 self.assertEqual(result.returncode, expected_code, result.stdout + result.stderr)
                 outcome = json.loads((logs / "penguin-outcome.json").read_text())
                 self.assertEqual(outcome["native_sessions_idle"], code != 6)
-                self.assertEqual(outcome["status"], "method_failed_cleanup" if cost_failure == 'stop' else "method_failed_unsettled" if cost_failure else {
+                self.assertEqual(outcome["status"], "method_failed_cleanup" if cost_failure == 'stop' else {
                     0: "completed", 5: "method_failed_active_work", 6: "method_failed_unsettled"}[code])
                 events = (root / "events").read_text().splitlines()
                 if code == 6:
@@ -402,6 +402,31 @@ class CostResponseTests(unittest.TestCase):
                                             capture_output=True, text=True, timeout=3)
                     self.assertEqual(result.returncode, 0 if valid else 1)
                     self.assertEqual(json.loads(result.stdout), {"valid": valid})
+
+
+@unittest.skipUnless(shutil.which("node"), "Node runtime required")
+class StateFileEvidenceTests(unittest.TestCase):
+    def test_real_node_state_inventory_hashes_files_without_opening_secrets(self):
+        import hashlib
+        with tempfile.TemporaryDirectory(prefix="synthetic-state-inventory-") as tmp:
+            root = Path(tmp)
+            (root / "AGENTS.md").write_text("SYNTHETIC fixed reader\n")
+            (root / ".vault.toml").write_text(TOKEN)
+            (root / "memory").mkdir()
+            (root / "memory/hidden.txt").write_text(TOKEN)
+            result = subprocess.run(["node", str(HELPER), "state-files", str(root)], capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn(TOKEN, result.stdout)
+            self.assertEqual(json.loads(result.stdout)["files"], {
+                "AGENTS.md": hashlib.sha256((root / "AGENTS.md").read_bytes()).hexdigest()})
+
+    def test_state_inventory_fails_closed_on_links_without_leaking_contents(self):
+        with tempfile.TemporaryDirectory(prefix="synthetic-state-inventory-link-") as tmp:
+            root = Path(tmp)
+            (root / "linked.txt").symlink_to("/etc/hosts")
+            result = subprocess.run(["node", str(HELPER), "state-files", str(root)], capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(json.loads(result.stdout)["complete"])
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ class FreezeTests(unittest.TestCase):
         self.h0.mkdir()
         self.evo.export_skill({"library": str(fixture.library), "limits": fixture.limits,
             "max_entries": 5, "max_bytes": 16000, "output": str(self.h0 / acceptance.SLOT)})
-        (self.h0 / "system_config.yaml").write_text("version: 1\nsystem_prompt: |\n  SYNTHETIC frozen solver\nmemory:\n  enabled: false\n")
+        (self.h0 / "system_config.yaml").write_text("version: 1\nsystem_prompt: |\n  SYNTHETIC frozen solver\nmemory:\n  enabled: false\n" + test_protocol.SYNTHETIC_OUTPUT_TOOLS)
         (self.h0 / "AGENTS.md").write_text("SYNTHETIC frozen agent guidance\n")
         shutil.copytree(self.h0, self.final)
         shutil.rmtree(self.final / acceptance.SLOT)
@@ -57,6 +57,14 @@ class FreezeTests(unittest.TestCase):
 
     def verify(self, **overrides):
         return acceptance.verify_freeze({**self.req, **overrides}, protocol.verify_export, self.evo)
+
+    def test_native_default_command_output_cap_cannot_truncate_frozen_injection(self):
+        for state, archive in ((self.h0, self.h0_archive), (self.final, self.final_archive)):
+            path = state / "system_config.yaml"
+            path.write_text(path.read_text().replace("maxOutputLength: 104192", "maxOutputLength: 16000"))
+            self.pack(state, archive)
+        with self.assertRaisesRegex(ValueError, "maxOutputLength must be at least"):
+            self.verify()
 
     def empty_export(self):
         f = self.f

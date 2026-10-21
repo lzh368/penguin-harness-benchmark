@@ -12,6 +12,8 @@ import unittest
 from unittest.mock import patch
 import protocol
 
+SYNTHETIC_OUTPUT_TOOLS = "max_turns: -1\ntools:\n  builtin:\n    - name: exec_command\n      maxOutputLength: 104192\n    - name: input_command\n      maxOutputLength: 104192\n"
+
 
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
@@ -118,7 +120,7 @@ class ProtocolTests(unittest.TestCase):
         base = self.root / "base"
         evo.export_skill({"library": str(library), "limits": {"general": 5, "topic": 5},
                           "max_entries": 5, "max_bytes": 16000, "output": str(base / "skills/evo-harness-learned")})
-        (base / "system_config.yaml").write_text("version: 1\nmemory:\n  enabled: false\nhooks:\n  enabled: false\n")
+        (base / "system_config.yaml").write_text("version: 1\nmemory:\n  enabled: false\nhooks:\n  enabled: false\n" + SYNTHETIC_OUTPUT_TOOLS)
         (base / "AGENTS.md").write_text("SYNTHETIC fixed reader\n")
         here = Path(__file__).resolve().parent
         trainer = self.root / "trainer"
@@ -200,7 +202,7 @@ class ExportEvidenceTests(unittest.TestCase):
         self.installed_helper.parent.mkdir(parents=True)
         shutil.copyfile(self.tool, self.installed_helper)
         self.evo = protocol.helper(self.installed_helper)
-        self.runtime = {"provider": "synthetic", "model_id": "no-model", "thinking_level": "high"}
+        self.runtime = getattr(self, "frozen_runtime", {"provider": "synthetic", "model_id": "no-model", "thinking_level": "high"})
         self.train = [f"train_{i:03d}" for i in range(1, 6)]
         self.training = {"guard_version": 2, "train_ids": self.train, "attempt_id": "attempt-1",
                          "config_sha256": getattr(self, "config_sha256", hashlib.sha256(b"SYNTHETIC frozen protocol").hexdigest()),
@@ -323,9 +325,15 @@ class ExportEvidenceTests(unittest.TestCase):
                 end = min(offset + 4000, len(text))
                 receipt = {"material_path": str(material), "sha256": self.sha(material), "offset": offset,
                            "end": end, "total": len(text), "text": text[offset:end]}
-                rows += self.pair(f"synthetic-material-{n}-{offset}", json.dumps(receipt))
+                request = self.save(self.private / "requests" / f"{binding['session_id']}-material-{n}-{offset}.json",
+                                    {"op": "read-material", "path": str(material), "offset": offset})
+                rows += self.pair(f"synthetic-material-{n}-{offset}", json.dumps(receipt),
+                    arguments={"cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(request)])})
         for n, output in enumerate(outputs):
-            rows += self.pair(f"synthetic-output-{n}", json.dumps({"file_path": str(output), "sha256": self.sha(output)}))
+            request = self.save(self.private / "requests" / f"{binding['session_id']}-output-{n}.json",
+                                {"op": "file-digest", "path": str(output)})
+            rows += self.pair(f"synthetic-output-{n}", json.dumps({"file_path": str(output), "sha256": self.sha(output)}),
+                arguments={"cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(request)])})
         return rows
 
     def role(self, name, session, materials, output, task=None):
@@ -365,7 +373,7 @@ class ExportEvidenceTests(unittest.TestCase):
         rows = [json.loads(r) for r in original.splitlines()]
         for dropped in ("synthetic-material-0-4000", "synthetic-output-0"):
             self.write_trace(trace, [r for r in rows if r.get("payload", {}).get("tool_call_id") != dropped])
-            with self.assertRaisesRegex(ValueError, "fully read|not sealed"):
+        with self.assertRaisesRegex(ValueError, "fully read|sealed in native trace"):
                 self.evo.audit_role(role)
         trace.write_text(original)
 
@@ -375,7 +383,7 @@ class ExportEvidenceTests(unittest.TestCase):
             self.evo.audit_role(self.roles[0])
         self.write_trace(self.parent, [{"type": "event_msg", "payload": {"type": "subagent", "session_id": "synthetic-reflector-1"}}])
         self.save(Path(self.roles[0]["outputs"][0]), [])
-        with self.assertRaisesRegex(ValueError, "not sealed"):
+        with self.assertRaisesRegex(ValueError, "sealed in native trace"):
             self.evo.audit_role(self.roles[0])
 
     def test_missing_exported_trace_and_changed_answer_are_rejected(self):
@@ -474,7 +482,7 @@ class ExportEvidenceTests(unittest.TestCase):
         self.save(self.decisions, changed)
         record["decisions_sha256"] = self.sha(self.decisions)
         self.save(self.record_path, record)
-        with self.assertRaisesRegex(ValueError, "not sealed"):
+        with self.assertRaisesRegex(ValueError, "sealed in native trace"):
             self.verify()
 
     def test_reusing_a_learning_session_is_rejected(self):

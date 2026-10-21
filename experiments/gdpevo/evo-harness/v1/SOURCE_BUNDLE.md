@@ -23,7 +23,7 @@ bash experiments/gdpevo/evo-harness/v1/make_source_bundle.sh \
   /absolute/path/to/reviewed-penguin-checkout \
   <reviewed-40-character-commit> \
   /absolute/path/to/bundles/evo-reviewed-source.tar.gz \
-  24.18.0
+  24.20.0
 ```
 
 The builder uses `pnpm --filter @prismshadow/penguin-cli deploy --prod --offline`
@@ -66,6 +66,8 @@ the experiment configuration and public Harbor launch. Pass
 `--ak penguin_version=<bundle.json penguin_version>` and
 `--ak node_version=<bundle.json node_version>`. The package version is normally
 `0.2.16`; it is distinct from the git-describe string printed by `--version`.
+This deployment pins Node `24.20.0`, which differs from the generic adapter's
+default; never omit the explicit option or copy that default into a statement.
 For this experiment an absent or mismatched bundle stops dispatch: the shared
 README's optional network/npm fallback is not permitted.
 

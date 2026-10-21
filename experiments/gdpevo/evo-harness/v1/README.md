@@ -6,7 +6,7 @@ State, versioned snapshots and `scoreboard.yaml`. Evaluation workers launch
 Harbor; the host Controller alone advances the experiment. `protocol.py`
 performs one model-free file operation; it has no dispatch or scheduling loop.
 
-Method revision `2026.10.21.2` adds native plugin hooks for the continuous
+Method revision `2026.10.21.3` uses native plugin hooks for the continuous
 training contract. They inject the full training role contract, restrict the
 training coordinator to method helpers and native child delegation, and check
 evidence before test dispatch or Goal completion. The main Penguin still
@@ -59,10 +59,13 @@ API or Harbor run is called. Provide absolute paths. Operations:
 | op | Required fields |
 |---|---|
 | preflight | config, repo |
+| prepare-benchmarks | config, config_sha256, repo, output (the existing native Project's benchmarks directory) |
+| verify-benchmarks | same as prepare-benchmarks; checks files without changing them |
 | prepare-trainer | config, repo, evo_tool, base_state (sanitized initialized H0), method_skill, training_budget_usd, host_operation_id, config_sha256, output (new Trainer agent_state) |
 | pack-state | evo_tool, state, output (new tar.gz; archives native State contents) |
 | verify-export | evo_tool, submission, training_export, train_ids, private_learning, trace_root, runtime |
 | verify-freeze | evo_tool, export_request (verify-export JSON), h0_snapshot, final_snapshot (native agent_state/ tar.gz), h0_version, final_version, target_state, test_case_ids, runtime, active_state (h0/final; default final) |
+| verify-injection-matrix | config, config_sha256, evo_tool, matrix_request, snapshot (frozen native archive), runtime (complete frozen object), expected_version, benchmark (absolute native test Benchmark directory) |
 | matrix | evo_tool, cells (JSON array of unchanged native cell records), case_ids, runs, identity, time, summary_title, summary |
 
 `identity` is agent_id, expected_version, provider, model_id and thinking_level.
@@ -81,9 +84,25 @@ The source method must already be natively installed in the Controller State;
 (or explicit `method_hooks`) and enables only that package in Trainer. H0/final
 Target retain disabled hooks. Native children retain Penguin's normal leaf
 semantics; their evidence is checked by the training root and host.
-Register frozen Benchmarks whose public cases name this adapter revision and
-the unmodified task paths; the original task instructions/graders/split remain
-unchanged. Do not use a mixed job.yaml expecting automatic Skill transfer.
+Call `prepare-benchmarks` once to register frozen native Benchmarks from the
+complete frozen configuration. It only writes manifests, statements and rubrics;
+the main Penguin still dispatches every worker. The helper checks the matching
+six-task preflight pins and deployment hashes. Existing packages are verified,
+never overwritten, including on a retried preparation command. An actual
+material difference requires a newly versioned configuration and Benchmark id.
+Use `verify-benchmarks` again before delegation to detect material drift.
+
+Use its returned `training.case_ids` and `test.case_ids` in worker tickets,
+freeze requests, matrices and scoreboards. Native Case ids require `CASE-`:
+`CASE-001-tg003-train` and `CASE-001-tg003-test-001` are examples. The separate
+`case_to_task` mapping retains the original Harbor task names; never rename
+the source tasks or confuse `config.test_ids` with native Case ids. The public
+statement and adjacent `harbor-launch.json` include all frozen adapter options,
+especially `node_version`, bundle, host Project and complete runtime. Workers
+replace only the State-archive/job placeholders and follow the unchanged shared
+evaluation protocol. Do not hand-write statements or omit pinned adapter flags.
+The task instructions/graders/split remain unchanged. Do not use a mixed
+job.yaml expecting automatic Skill transfer.
 
 The group is `benchmarks/gdpevo/tasks/task_group_005/tg005-train`.
 Tests are `.../task_group_005/test_tasks/tg005-test-001` through `005`.
@@ -162,6 +181,24 @@ boundary, not a security sandbox against arbitrary hidden code/network calls.
 Verify export, install the exact allowed package bytes into native Target State, snapshot,
 pack through agent_state_tar, and compare actual runtime injection receipts.
 Train answers, raw trace, judge output and private scratch never enter test.
+Before declaring method completion, `verify-injection-matrix` binds each native
+cell to its unique original Harbor trial, task, model, verifier reward, duration
+and cost. It checks the actual installed State against the native snapshot;
+the adapter records file hashes after extraction, after native startup/turn-cap
+configuration and after shutdown. Freeze `max_turns: -1` and the full native
+command-output limits before transport: supported native loading/turn-cap setup
+is then byte-idempotent. All three complete State maps must equal the frozen
+snapshot; there is no blanket startup-rewrite exemption. Vault, memory and
+schedules are not read or retained by this inventory.
+The audit then checks the original test Session's full reader/index reads and
+one canonical selector stdout against the frozen package. Empty H0 and a
+nonempty library with no relevant entries both permit `selected: []`; neither
+permits skipping the reader/selector. Missing method evidence blocks completion
+without deleting or changing the original verifier's score. Unknown cost stays
+null/pending and does not justify rerunning a scored task. The audit emits only
+selection ids/hashes/byte counts and original public cell metrics, never test
+answers or per-item error feedback for learning. This cooperative trace audit
+is not a sandbox against obfuscated arbitrary code.
 H0-equivalent compilation runs the H0 matrix after training and freezing, then
 reuses it with an explicit reuse label; there is no second measurement or
 claimed improvement.
@@ -193,3 +230,18 @@ must say synthetic. Real learned content, scores, injection and total spend
 remain unmeasured until the separately authorized experiment. A paid trial
 must collect actual read/feedback/injection/cleanup evidence; an offline fixture
 cannot establish that a real model followed a Skill.
+
+After building Penguin, run the actual native State/output regression without
+calling a model:
+
+```bash
+node experiments/gdpevo/evo-harness/v1/test_native_runtime.mjs \
+  /absolute/path/to/built-penguin-checkout /absolute/path/to/native-state-output-probe.json
+```
+
+It executes the method's documented field-only configuration recipe against a
+fresh native State, transports it through the real tar format and loads a native
+Session with network/model traps. A synthetic 16000-byte procedure demonstrates
+that the old native 16000-character output cap truncates its selector receipt,
+while the frozen 104192-character cap preserves it in full. This changes only
+output transport capacity; the learned-guidance budget remains 16000 bytes.

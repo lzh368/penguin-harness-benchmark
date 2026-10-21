@@ -100,6 +100,8 @@ def prepare_trainer(req):
             "Trainer H0 may carry only the learned slot")
     require(not any(p.startswith("hooks/") for p in files), "H0 must not carry controller hooks")
     evo.validate_package(base / "skills/evo-harness-learned")
+    helper(Path(__file__).with_name("acceptance.py")).verify_output_budget(
+        (base / "system_config.yaml").read_bytes(), read(base / "skills/evo-harness-learned/index.json")["max_bytes"])
     skill = Path(req["method_skill"])
     require(skill.is_dir() and not skill.is_symlink(), "method Skill missing")
     evo.filemap(skill)
@@ -107,7 +109,7 @@ def prepare_trainer(req):
     hook_files = evo.filemap(hooks)
     require(set(hook_files) == {"hooks.json", "guard.mjs", "icon.svg"}, "supply the native installed Evo hook package")
     manifest = read(hooks / "hooks.json")
-    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.2",
+    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.3",
             "wrong native method hook package")
     for point in ("user_prompt", "pre_tool_use", "stop"):
         require(len(manifest[point]) == 1 and manifest[point][0]["command"] == "guard.mjs",
@@ -331,6 +333,11 @@ def matrix(req):
 
 def execute(req):
     operations = {"preflight": lambda r: validate_config(read(r["config"]), r["repo"]),
+                  "prepare-benchmarks": lambda r: helper(Path(__file__).with_name("registration.py")).execute(r, validate_config),
+                  "verify-benchmarks": lambda r: helper(Path(__file__).with_name("registration.py")).execute(r, validate_config),
+                  "verify-injection-matrix": lambda r: helper(Path(__file__).with_name("injection.py")).verify_matrix(
+                      r, matrix, helper(Path(__file__).with_name("acceptance.py")), helper(r["evo_tool"]),
+                      helper(Path(__file__).with_name("registration.py")), validate_config),
                   "prepare-trainer": prepare_trainer, "pack-state": pack_state,
                   "verify-export": verify_export, "matrix": matrix,
                   "verify-freeze": lambda r: helper(Path(__file__).with_name("acceptance.py")).verify_freeze(r, verify_export, helper(r["evo_tool"]))}
