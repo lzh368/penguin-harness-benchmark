@@ -136,6 +136,13 @@ const session = await imported.createSession({
   apiKey: "SYNTHETIC_UNUSED_KEY",
 });
 const ready = inventory(installed);
+const nativeDispatch = core.buildToolConfig(imported.state).customTools.find(
+  (tool) => tool.name === "run_subagent",
+);
+const nativePromptFileParameters =
+  nativeDispatch?.parameters.properties.prompt_file?.type === "string" &&
+  nativeDispatch?.parameters.properties.prompt_sha256?.type === "string" &&
+  !nativeDispatch?.parameters.required.includes("prompt");
 const outputs = [];
 for (const cap of [16000, 104192]) {
   const config = core.buildToolConfig(imported.state);
@@ -180,6 +187,7 @@ const report = {
   archive_exact: equals(before, extracted),
   native_load_exact: equals(before, ready),
   after_exact: equals(ready, after),
+  native_prompt_file_parameters: nativePromptFileParameters,
   selector_output: outputs,
   probe_root: tmp,
 };
@@ -189,6 +197,7 @@ if (
   !report.archive_exact ||
   !report.native_load_exact ||
   !report.after_exact ||
+  !report.native_prompt_file_parameters ||
   !outputs[0].truncated ||
   outputs[1].truncated ||
   outputs[1].observed_bytes !== 16000

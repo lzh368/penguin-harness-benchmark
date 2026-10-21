@@ -349,7 +349,9 @@ class ExportEvidenceTests(unittest.TestCase):
         binding = self.binding(session)
         trace = self.traces / f"{session}_001.jsonl"
         prompt = json.dumps({"evo_role_seal": {**contract, "parent_session_id": self.root_binding["session_id"]}})
-        call = {"prompt": prompt, "description": "SYNTHETIC " + name, "provider": self.runtime["provider"], "model_id": self.runtime["model_id"]}
+        prompt_path = self.save_text(self.private / "dispatch" / (session + ".prompt.txt"), prompt)
+        call = {"prompt_file": str(prompt_path), "prompt_sha256": self.sha(prompt_path),
+                "description": "SYNTHETIC " + name, "provider": self.runtime["provider"], "model_id": self.runtime["model_id"]}
         slot = name + "/" + (task or "batch-1")
         ticket = {"schema": 2, "session_id": self.root_binding["session_id"], "phase": name, "task_id": task, "slot": slot, "call": call}
         self.save(self.private / "dispatch" / (session + ".json"), ticket)
@@ -387,6 +389,10 @@ class ExportEvidenceTests(unittest.TestCase):
         moved = self.root / "exported-harbor-artifacts"
         shutil.move(str(self.run), moved)
         self.assertFalse(self.run.exists())
+        # Host evidence comes from immutable child USER messages and sealed
+        # original traces. The container's dispatch inputs are not a new host
+        # dependency, nor may an audit rewrite paths inside those traces.
+        shutil.rmtree(moved / "private/dispatch")
         self.assertEqual(self.verify(moved), self.package)
 
     def test_export_summary_without_context_or_role_evidence_is_rejected(self):
