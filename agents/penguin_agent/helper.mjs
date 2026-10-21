@@ -2,6 +2,9 @@
 //
 //   node helper.mjs now
 //       Prints the current time in epoch milliseconds.
+//   node helper.mjs ready <data root> [deadline epoch ms]
+//       Makes one authenticated loopback HTTP readiness check. Prints no token/body;
+//       exits 1 until the application's protected API returns 200.
 //   node helper.mjs run-status <penguin-run.json>
 //       Prints "<status> <sessionId>" from `penguin run --json` output, or "error -".
 //   node helper.mjs abort <data root> <sessionId> <wait seconds>
@@ -47,23 +50,59 @@ function readOr(file, fallback) {
 
 // Same addressing as the CLI: localhost (the server reserves 127.0.0.1 for previews) and
 // the Bearer token the server writes to <root>/api-token at every boot. Right after the
-// server reports ready the token file can still be empty, so the token is read fresh for
-// every attempt and a 401 is retried for a while, as the CLI itself re-reads it on a 401.
+// listener/lock appears the App may still answer 503 "penguin-server is starting".
+// Read the token afresh per attempt; neither a TCP listener nor a token means HTTP ready.
+async function apiOnce(root, method, apiPath, body, timeoutMs = 3000) {
+  const lock = JSON.parse(readOr(path.join(root, "server.lock"), "{}"));
+  const token = readOr(path.join(root, "api-token"), "").trim();
+  if (!Number.isInteger(lock.port) || lock.port < 1 || lock.port > 65535 || !token) return null;
+  return fetch(`http://localhost:${lock.port}${apiPath}`, {
+    method,
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body !== undefined ? { "content-type": "application/json" } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+}
+
+async function isStarting(response) {
+  return response.status === 503 &&
+    (await response.clone().text()).trim() === "penguin-server is starting";
+}
+
+async function ready(root, deadlineMs) {
+  const result = { ready: false, http_status: null };
+  try {
+    // /api/projects requires authentication; a public page or listening socket
+    // would not prove that this root's token and the actual App are ready.
+    const remainingMs = deadlineMs === undefined ? 1000 : Number(deadlineMs) - Date.now();
+    const response = Number.isFinite(remainingMs) && remainingMs > 0
+      ? await apiOnce(root, "GET", "/api/projects", undefined, Math.min(1000, Math.ceil(remainingMs)))
+      : null;
+    if (response !== null) {
+      result.http_status = response.status;
+      result.ready = response.status === 200;
+      await response.body?.cancel();
+    }
+  } catch {
+    // Never copy response bodies, credentials, or arbitrary transport errors to logs.
+  }
+  out(result);
+  if (!result.ready) process.exitCode = 1;
+}
+
 async function api(root, method, apiPath, body) {
   let last;
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const lock = JSON.parse(readOr(path.join(root, "server.lock"), "{}"));
-    const token = readOr(path.join(root, "api-token"), "").trim();
-    if (lock.port && token) {
-      last = await fetch(`http://localhost:${lock.port}${apiPath}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${token}`,
-          ...(body !== undefined ? { "content-type": "application/json" } : {}),
-        },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      });
-      if (last.status !== 401) return last;
+    const response = await apiOnce(root, method, apiPath, body);
+    if (response !== null) {
+      last = response;
+      const retry = last.status === 401 || await isStarting(last);
+      if (!retry || attempt === 39) return last;
+      await last.body?.cancel();
     }
     await sleep(500);
   }
@@ -199,6 +238,9 @@ switch (command) {
     break;
   case "run-status":
     runStatus(args[0]);
+    break;
+  case "ready":
+    await ready(args[0], args[1]);
     break;
   case "abort":
     await abort(args[0], args[1], args[2] ?? "60");

@@ -49,8 +49,11 @@ def validate_config(config, repo):
     require(config["training_passes"] == config["attempts_per_task"] == config["batch_count"] == 1,
             "v1 is exactly one batch/attempt/pass")
     require(type(config["test_repeats"]) is int and config["test_repeats"] > 0, "invalid repeats")
-    require(config["train_concurrency"] == 1 and type(config["test_concurrency"]) is int
-            and 1 <= config["test_concurrency"] <= 8, "invalid concurrency")
+    require(type(config["train_concurrency"]) is int and config["train_concurrency"] == 1
+            and type(config["test_concurrency"]) is int and config["test_concurrency"] == 5,
+            "v1 requires sequential training and five concurrent tests")
+    require(config["test_phase_order"] == ["train_compile_freeze", "h0_test", "final_test"],
+            "v1 requires training and freezing before either held-out test phase")
     require(config["feedback"] == "train-api-score-correct" and config["empty_policy"] == "reuse-h0",
             "protocol feedback/reuse mismatch")
     root = Path(repo) / "benchmarks/gdpevo/tasks" / f"task_group_{group}"

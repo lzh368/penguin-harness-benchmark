@@ -13,7 +13,7 @@
 #
 # Outputs in $PB_LOGS: penguin-run.json (the CLI's --json output), penguin-run.stderr,
 # penguin-cost-by-session.json, penguin-cost-by-model.json, penguin-outcome.json,
-# penguin/{server.log,max-turns.json,server-stop.json,abort.json,redaction.json,
+# penguin/{server.log,server-ready.json,max-turns.json,server-stop.json,abort.json,redaction.json,
 # traces/<agent>/,logs/}.
 #
 # Exit status: that of `penguin run` (0 = completed or soft timeout), after the cleanup
@@ -35,17 +35,24 @@ now_ms() { "$NODE" "$HELPER" now; }
 cd "$PB_PREFIX" || exit 3
 
 # 1. Start the server on the throw-away root. PORT=0 picks a free port; the CLI finds the
-#    server through $PENGUIN_HOME/server.lock.
+#    server through $PENGUIN_HOME/server.lock. A live TCP lock precedes App startup;
+#    wait for the authenticated HTTP API, not `server status`'s process check.
+SERVER_DEADLINE_MS=$(( $(now_ms) + 60000 ))
 PORT=0 HOST=127.0.0.1 "$PENGUIN" server >"$OUT/penguin/server.log" 2>&1 &
 SERVER_PID=$!
 SERVER_READY=false
-for _ in $(seq 1 60); do
-  if "$PENGUIN" server status --root "$PENGUIN_HOME" 2>/dev/null | grep -q '"running":true'; then
+# Bound the whole wait, including HTTP timeouts and sleeps, to the existing 60s
+# startup allowance. Passing the deadline also caps the final HTTP attempt.
+while [ "$(now_ms)" -lt "$SERVER_DEADLINE_MS" ]; do
+  if "$NODE" "$HELPER" ready "$PENGUIN_HOME" "$SERVER_DEADLINE_MS" >"$OUT/penguin/server-ready.json" 2>/dev/null; then
     SERVER_READY=true
     break
   fi
   kill -0 "$SERVER_PID" 2>/dev/null || break
-  sleep 1
+  REMAINING_MS=$(( SERVER_DEADLINE_MS - $(now_ms) ))
+  [ "$REMAINING_MS" -gt 0 ] || break
+  [ "$REMAINING_MS" -le 1000 ] || REMAINING_MS=1000
+  sleep "$(printf '%d.%03d' "$((REMAINING_MS / 1000))" "$((REMAINING_MS % 1000))")"
 done
 
 STARTED_MS="$(now_ms)"

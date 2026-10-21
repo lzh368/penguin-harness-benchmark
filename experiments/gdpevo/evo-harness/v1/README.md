@@ -9,10 +9,26 @@ performs one model-free file operation; it has no dispatch or scheduling loop.
 `profile.json` is a **draft without spending authorization or a selected model**.
 It fixes ERP task_group_005, five train/five test, one learning pass, one attempt
 per training task, one batch compilation, one test repeat, training concurrency
-1 and test concurrency 4. This is a development pilot, not unbiased coverage of
+1 and test concurrency 5. Within each H0 or final test phase, the main Penguin
+launches all five independent test workers concurrently, with a total test
+concurrency limit of 5; the two State phases do not overlap. Training remains
+one continuous group with its five members solved sequentially. This is a
+development pilot, not unbiased coverage of
 all groups. Fix the actual provider/model_id/thinking, current USD budget, host
 and container commits/bundle hash and successful isolation probes before paid
 work. Do not import old WikiSkill results, budgets or learned content.
+
+The user froze `test_phase_order` as `train_compile_freeze → h0_test → final_test`
+for this ERP experiment, overriding the method's generic H0-first timing.
+Create the empty-library H0 snapshot before training, then complete all five
+training members, compilation, export verification and package freezing before
+executing any held-out test. Measure the frozen H0 State on all five tests at
+once; after that matrix and its workers have finished, measure the frozen final
+State on the same five tests at once. If the frozen package equals H0, run only
+the H0 test matrix and explicitly reuse it for final (`reused_equivalent_h0`).
+This timing changes no learning rule: neither matrix can affect the compiled
+package. The main Penguin follows this frozen order through native workers;
+`protocol.py` validates files and does not schedule stages.
 
 Sources verified 2026-10-21:
 
@@ -86,9 +102,12 @@ penguin run --project-id <dedicated-project> --agent-id <controller> \
   --message "使用 Evo-Harness，读取已冻结的实验配置，在 GDPevo task_group_005 的原始 5 train/5 test 上做一次批次学习和冻结技能对比，按已给的模型与本次预算完成并汇报。"
 ```
 
-No `--source` on current Penguin. The Controller reads method Skill, invokes
-native evaluation workers for H0, one group training worker, publishes the
-exported package into a new Target State, and invokes final test workers.
+No `--source` on current Penguin. The Controller reads the method Skill and this
+frozen order, snapshots H0, invokes one group training worker, and verifies and
+freezes the exported package. It then invokes the five H0 evaluation workers
+concurrently, waits for their complete matrix and termination, publishes the
+exact frozen package into a new Target State, and invokes the five final test
+workers concurrently.
 It records the whole complete matrix on the test Benchmark scoreboard.
 The container's training root delegates only its batch; it cannot run baseline
 or held-out test. Reflector/Evolver are native role Sessions, never Codex-written
@@ -114,8 +133,9 @@ Trace basenames must be unambiguous; missing evidence blocks publication.
 Verify export, install the exact allowed package bytes into native Target State, snapshot,
 pack through agent_state_tar, and compare actual runtime injection receipts.
 Train answers, raw trace, judge output and private scratch never enter test.
-H0-equivalent compilation reuses the original H0 results with an explicit reuse
-label; there is no second measurement or claimed improvement.
+H0-equivalent compilation runs the H0 matrix after training and freezing, then
+reuses it with an explicit reuse label; there is no second measurement or
+claimed improvement.
 
 Model-free environment probes must check unprivileged uid, inaccessible private
 grader/service files, business loopback, model host reachability, nonallowed

@@ -88,6 +88,27 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             protocol.validate_config(config, repo)
 
+    def test_frozen_concurrency_is_five_tests_and_one_training(self):
+        here = Path(__file__).resolve().parent
+        config = protocol.read(here / "profile.json")
+        self.assertEqual(config["train_concurrency"], 1)
+        self.assertEqual(config["test_concurrency"], 5)
+        protocol.validate_config(config, here.parents[3])
+        for field, values in (("test_concurrency", [1, 4, 6, 8, True]),
+                              ("train_concurrency", [0, 2, 5, True])):
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "concurrent tests"):
+                    protocol.validate_config({**config, field: value}, here.parents[3])
+
+    def test_frozen_test_order_requires_training_and_freezing_first(self):
+        here = Path(__file__).resolve().parent
+        config = protocol.read(here / "profile.json")
+        self.assertEqual(config["test_phase_order"], ["train_compile_freeze", "h0_test", "final_test"])
+        for order in (["h0_test", "train_compile_freeze", "final_test"],
+                      ["train_compile_freeze", "final_test", "h0_test"], []):
+            with self.subTest(order=order), self.assertRaisesRegex(ValueError, "freezing before"):
+                protocol.validate_config({**config, "test_phase_order": order}, here.parents[3])
+
     def test_native_state_pack_preserves_whole_learned_skill_without_scratch(self):
         evo = protocol.helper(self.tool)
         library = self.root / "library.json"

@@ -182,6 +182,7 @@ import json, os, sys, time
 from pathlib import Path
 command, args = sys.argv[2], sys.argv[3:]
 if command == 'now': print(int(time.time()*1000))
+elif command == 'ready': print('{"ready":true,"http_status":200}')
 elif command == 'set-max-turns': print(json.dumps({'max_turns':int(args[-1])}))
 elif command == 'run-status':
     result=json.loads(Path(args[0]).read_text()); print(result['status'],result['sessionId'])

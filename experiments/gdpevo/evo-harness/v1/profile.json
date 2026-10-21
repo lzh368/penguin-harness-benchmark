@@ -21,7 +21,12 @@
   "test_repeats": 1,
   "learning_repeats": 1,
   "train_concurrency": 1,
-  "test_concurrency": 4,
+  "test_concurrency": 5,
+  "test_phase_order": [
+    "train_compile_freeze",
+    "h0_test",
+    "final_test"
+  ],
   "feedback": "train-api-score-correct",
   "empty_policy": "reuse-h0",
   "harbor_version": "0.23.0",
