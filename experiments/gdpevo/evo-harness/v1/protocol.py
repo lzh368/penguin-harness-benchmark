@@ -109,7 +109,7 @@ def prepare_trainer(req):
     hook_files = evo.filemap(hooks)
     require(set(hook_files) == {"hooks.json", "guard.mjs", "icon.svg"}, "supply the native installed Evo hook package")
     manifest = read(hooks / "hooks.json")
-    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.7",
+    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.8",
             "wrong native method hook package")
     for point in ("user_prompt", "pre_tool_use", "stop"):
         require(len(manifest[point]) == 1 and manifest[point][0]["command"] == "guard.mjs",
