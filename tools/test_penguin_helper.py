@@ -114,22 +114,166 @@ class HelperReadinessTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
         self.assertLess(time.monotonic() - started, 0.9)
 
-    def test_existing_config_api_retries_starting_and_401(self):
-        self.responses = [(503, "penguin-server is starting"), (401, {}),
-                          (200, {}), (200, {"config": {"maxTurns": -1}})]
+    def target(self, agent="fixture"):
+        return {"stateDir": str(self.root / "project/agents" / agent / "agent_state"), "config": {"maxTurns": -1}}
+
+    def target_ready(self, deadline=None):
+        return self.invoke("ready", str(deadline or int(time.time()*1000)+3000), "project", "fixture")
+
+    def test_target_readiness_waits_for_project_then_agent_without_mutation(self):
+        self.responses = [(200, {"projects": []})]
+        result, body = self.target_ready()
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(body["ready"])
+        self.assertEqual(body["stage"], "projects")
+        self.responses = [(200, {"projects": [{"projectId": "project"}]}), (404, {"error": TOKEN})]
+        result, body = self.target_ready()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(body["http_status"], 404)
+        self.responses = [(200, {"projects": [{"projectId": "project"}]}), (200, self.target())]
+        result, body = self.target_ready()
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(body["ready"])
+        self.assertTrue(all(method == "GET" for method, _, _ in self.requests))
+
+    def test_target_readiness_rejects_wrong_state_and_malformed_inventory(self):
+        for responses in [[(200, {"projects": [{"projectId": "project"}]}), (200, self.target("wrong"))],
+                          [(200, {"projects": [None]})]]:
+            with self.subTest(responses=responses):
+                self.responses = responses
+                result, body = self.target_ready()
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(body["ready"])
+                self.assertFalse(body["retryable"])
+
+    def test_target_auth_is_read_only_and_token_is_refreshed_per_attempt(self):
+        self.responses = [(401, TOKEN)]
+        result, body = self.target_ready()
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(body["retryable"])
+        (self.root / "api-token").write_text(TOKEN + "_ROTATED")
+        self.responses = [(403, TOKEN)]
+        result, body = self.target_ready()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(body["retryable"])
+        self.assertEqual([request[2] for request in self.requests], ["Bearer " + TOKEN, "Bearer " + TOKEN + "_ROTATED"])
+        self.assertTrue(all(method == "GET" for method, _, _ in self.requests))
+
+    def test_target_second_get_uses_remaining_deadline(self):
+        self.responses = [(200, {"projects": [{"projectId": "project"}]}), (200, self.target())]
+        self.response_delay = 0.25
+        started = time.monotonic()
+        result, body = self.target_ready(int(time.time()*1000) + 450)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(body["ready"])
+        self.assertEqual(len(self.requests), 2)
+        self.assertLess(time.monotonic() - started, 0.75)
+
+    def test_target_config_body_finishing_after_deadline_is_not_ready(self):
+        preload = self.root/"slow-body.mjs"
+        preload.write_text("let clock=1000; Date.now=()=>clock;\n" +
+            "globalThis.fetch=async(url)=>({status:200,json:async()=>{\n" +
+            "if(new URL(url).pathname==='/api/projects')return {projects:[{projectId:'project'}]};\n" +
+            "clock=2001; return " + json.dumps(self.target()) + ";}});\n")
+        result = subprocess.run(["node", "--import", str(preload), str(HELPER), "ready", str(self.root),
+                                 "2000", "project", "fixture"], capture_output=True,text=True,timeout=3)
+        self.assertEqual(result.returncode,1)
+        self.assertFalse(json.loads(result.stdout)['ready'])
+        self.assertEqual(self.requests,[])
+        self.assertNotIn(TOKEN,result.stdout+result.stderr)
+
+    def test_config_update_is_one_put_and_successful_readback(self):
+        self.responses = [(200, {}), (200, {"config": {"maxTurns": -1}})]
         result, body = self.invoke("set-max-turns", "synthetic", "fixture", "-1")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(body["max_turns"], -1)
-        self.assertEqual([method for method, _, _ in self.requests], ["PUT", "PUT", "PUT", "GET"])
+        self.assertEqual([method for method, _, _ in self.requests], ["PUT", "GET"])
         self.assertTrue(all(auth == "Bearer " + TOKEN for _, _, auth in self.requests))
 
-    def test_non_startup_503_is_not_retried(self):
-        self.responses = [(503, "penguin-server has no running platform: synthetic failure"),
-                          (503, "penguin-server has no running platform: synthetic failure")]
-        result, body = self.invoke("set-max-turns", "synthetic", "fixture", "-1")
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(body["put_status"], 503)
-        self.assertEqual([method for method, _, _ in self.requests], ["PUT", "GET"])
+    def test_failed_config_put_is_never_retried_or_accepted_by_readback(self):
+        for status in (401, 403, 404, 503):
+            with self.subTest(status=status):
+                self.requests.clear()
+                self.responses = [(status, "penguin-server is starting"),
+                                  (200, {"config": {"maxTurns": -1}})]
+                result, body = self.invoke("set-max-turns", "synthetic", "fixture", "-1")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(body["put_status"], status)
+                self.assertNotIn("max_turns", body)
+                self.assertEqual([method for method, _, _ in self.requests], ["PUT"])
+
+    def test_real_adapter_shell_waits_read_only_then_puts_and_submits_once(self):
+        # The real shell and real helper talk to a synthetic local API. The CLI
+        # Task is a fixture only, so no Session or model request can be created.
+        self.responses = [(200, {"projects": []}),
+            (200, {"projects": [{"projectId": "project"}]}), (404, {}),
+            (200, {"projects": [{"projectId": "project"}]}), (200, self.target()),
+            (200, {}), (200, self.target()),
+            (200, {"agents": [{"agentId": "fixture"}]}), (200, {"sessions": [self.session()]})]
+        result, events = self.adapter_shell()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(events, ["task", "stop"])
+        self.assertEqual([m for m, _, _ in self.requests], ["GET"]*5 + ["PUT", "GET", "GET", "GET"])
+        outcome = json.loads((self.root/"logs/penguin-outcome.json").read_text())
+        self.assertTrue(outcome["server_ready"])
+        self.assertEqual(outcome["status"], "completed")
+
+    def test_real_adapter_shell_forbidden_target_never_updates_or_submits(self):
+        self.responses = [(403, TOKEN)]
+        result, events = self.adapter_shell()
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(events, ["stop"])
+        self.assertEqual([m for m, _, _ in self.requests], ["GET"])
+        private_log = self.root/"logs/penguin/server.log"
+        self.assertIn(TOKEN, private_log.read_text())
+        self.assertEqual(private_log.stat().st_mode & 0o777, 0o600)
+
+    def adapter_shell(self):
+        prefix = self.root/"prefix"
+        (prefix/"node/bin").mkdir(parents=True)
+        (prefix/"bin").mkdir()
+        (prefix/"node/bin/node").symlink_to(shutil.which("node"))
+        shutil.copyfile(HELPER, prefix/"helper.mjs")
+        (prefix/"instruction.md").write_text("SYNTHETIC no model or real task")
+        state = self.root/"project/agents/fixture/agent_state"
+        state.mkdir(parents=True)
+        (state/"system_config.yaml").write_text("max_turns: -1\n")
+        penguin = prefix/"bin/penguin"
+        penguin.write_text("#!" + sys.executable + "\n" + '''
+import json, os, signal, sys, time
+from pathlib import Path
+home = Path(os.environ['PENGUIN_HOME'])
+pid = home/'fixture-server.pid'
+def event(name):
+    with (home/'fixture-events').open('a') as file: file.write(name+'\\n')
+if sys.argv[1:] == ['server']:
+    pid.write_text(str(os.getpid()))
+    print(os.environ['FIXTURE_PRIVATE_LOG'], flush=True)
+    time.sleep(60)
+elif sys.argv[1:3] == ['server', 'stop']:
+    event('stop')
+    if pid.exists():
+        try: os.kill(int(pid.read_text()), signal.SIGTERM)
+        except ProcessLookupError: pass
+    print('{"ok":true}')
+elif sys.argv[1:3] == ['run', '--help']: print('SYNTHETIC no-source')
+elif sys.argv[1] == 'run':
+    event('task')
+    print('{"status":"completed","sessionId":"root"}')
+elif sys.argv[1] == 'cost': print('{"groups":[]}')
+else: raise SystemExit('unexpected fixture CLI command')
+''')
+        penguin.chmod(0o755)
+        env = {k:v for k,v in os.environ.items()
+               if k.upper() not in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_OPTIONS")}
+        env.update(PENGUIN_HOME=str(self.root), PB_PREFIX=str(prefix), PB_LOGS=str(self.root/"logs"),
+                   PB_PROJECT="project", PB_AGENT="fixture", PB_PROVIDER="synthetic", PB_MODEL="no-model",
+                   PB_THINKING="high", PB_TIMEOUT="5s", PB_ABORT_WAIT="2", PB_MAX_TURNS="-1",
+                   FIXTURE_PRIVATE_LOG=TOKEN)
+        result = subprocess.run(["bash", str(HELPER.with_name("run.sh"))], cwd=self.root, env=env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotIn(TOKEN, result.stdout+result.stderr)
+        return result, (self.root/"fixture-events").read_text().splitlines()
 
     @staticmethod
     def session(session_id="root", **extra):
@@ -238,6 +382,7 @@ command, args = sys.argv[2], sys.argv[3:]
 if command == 'now': print(clock.read_text())
 elif command == 'ready':
     assert args[1] == '60000', args
+    assert args[2:] == ['project', 'fixture'], args
     with Path(os.environ['FIXTURE_CHECKS']).open('a') as out: out.write('check\\n')
     clock.write_text(str(int(clock.read_text()) + 1000))
     print('{"ready":false,"http_status":503}')

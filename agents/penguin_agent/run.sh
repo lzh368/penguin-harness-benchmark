@@ -40,15 +40,24 @@ cd "$PB_PREFIX" || exit 3
 #    server through $PENGUIN_HOME/server.lock. A live TCP lock precedes App startup;
 #    wait for the authenticated HTTP API, not `server status`'s process check.
 SERVER_DEADLINE_MS=$(( $(now_ms) + 60000 ))
+# Native first-boot notices can contain a claim token. Keep the original private
+# log for diagnosis, but never copy it to the adapter's public failure output.
+(umask 077; : >"$OUT/penguin/server.log")
+chmod 600 "$OUT/penguin/server.log"
 PORT=0 HOST=127.0.0.1 "$PENGUIN" server >"$OUT/penguin/server.log" 2>&1 &
 SERVER_PID=$!
 SERVER_READY=false
 # Bound the whole wait, including HTTP timeouts and sleeps, to the existing 60s
 # startup allowance. Passing the deadline also caps the final HTTP attempt.
 while [ "$(now_ms)" -lt "$SERVER_DEADLINE_MS" ]; do
-  if "$NODE" "$HELPER" ready "$PENGUIN_HOME" "$SERVER_DEADLINE_MS" >"$OUT/penguin/server-ready.json" 2>/dev/null; then
+  if "$NODE" "$HELPER" ready "$PENGUIN_HOME" "$SERVER_DEADLINE_MS" "$PB_PROJECT" "$PB_AGENT" >"$OUT/penguin/server-ready.json" 2>/dev/null; then
     SERVER_READY=true
     break
+  else
+    READY_RC=$?
+    # Target/auth/config errors are not startup transients. No mutation or Task
+    # is permitted before the exact Project and Agent State become readable.
+    [ "$READY_RC" -eq 1 ] || break
   fi
   kill -0 "$SERVER_PID" 2>/dev/null || break
   REMAINING_MS=$(( SERVER_DEADLINE_MS - $(now_ms) ))
@@ -192,7 +201,7 @@ fi
 if [ "$RUN_RC" -ne 0 ]; then
   echo "penguin run exited with status $RUN_RC ($STATUS); last lines of its stderr:" >&2
   tail -n 40 "$OUT/penguin-run.stderr" >&2 2>/dev/null
-  [ "$SERVER_READY" = true ] || tail -n 40 "$OUT/penguin/server.log" >&2 2>/dev/null
+  [ "$SERVER_READY" = true ] || echo "Penguin target readiness failed; see the sanitized server-ready.json receipt." >&2
   [ "$STATUS" = "config_failed" ] && cat "$OUT/penguin/max-turns.json" >&2 2>/dev/null
 fi
 exit "$RUN_RC"

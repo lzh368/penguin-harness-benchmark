@@ -2,9 +2,10 @@
 //
 //   node helper.mjs now
 //       Prints the current time in epoch milliseconds.
-//   node helper.mjs ready <data root> [deadline epoch ms]
+//   node helper.mjs ready <data root> [deadline epoch ms] [projectId agentId]
 //       Makes one authenticated loopback HTTP readiness check. Prints no token/body;
-//       exits 1 until the application's protected API returns 200.
+//       with a target, also requires its Project and readable Agent config/State.
+//       Exits 1 for bounded startup retry, 2 for a permanent target/auth failure.
 //   node helper.mjs run-status <penguin-run.json>
 //       Prints "<status> <sessionId>" from `penguin run --json` output, or "error -".
 //   node helper.mjs abort <data root> <sessionId> <wait seconds>
@@ -128,25 +129,73 @@ async function isStarting(response) {
     (await response.clone().text()).trim() === "penguin-server is starting";
 }
 
-async function ready(root, deadlineMs) {
+async function ready(root, deadlineMs, projectId, agentId) {
   const result = { ready: false, http_status: null };
+  const targeted = projectId !== undefined || agentId !== undefined;
+  const deadline = deadlineMs === undefined ? Date.now() + 1000 : Number(deadlineMs);
+  if (targeted) Object.assign(result, { stage: "projects", retryable: true });
+  const request = async (apiPath) => {
+    const remainingMs = deadline - Date.now();
+    return Number.isFinite(remainingMs) && remainingMs > 0
+      ? apiOnce(root, "GET", apiPath, undefined, Math.min(1000, Math.ceil(remainingMs)))
+      : null;
+  };
   try {
+    if (targeted && ![projectId, agentId].every((id) => typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id))) {
+      result.retryable = false;
+      throw new Error("invalid_readiness_target");
+    }
     // /api/projects requires authentication; a public page or listening socket
     // would not prove that this root's token and the actual App are ready.
-    const remainingMs = deadlineMs === undefined ? 1000 : Number(deadlineMs) - Date.now();
-    const response = Number.isFinite(remainingMs) && remainingMs > 0
-      ? await apiOnce(root, "GET", "/api/projects", undefined, Math.min(1000, Math.ceil(remainingMs)))
-      : null;
+    const response = await request("/api/projects");
     if (response !== null) {
       result.http_status = response.status;
-      result.ready = response.status === 200;
-      await response.body?.cancel();
+      if (!targeted) {
+        result.ready = response.status === 200;
+        await response.body?.cancel();
+      } else if (response.status !== 200) {
+        // The per-boot token can rotate between reading api-token and fetch.
+        // A 401 permits another bounded read-only check with a fresh token.
+        result.retryable = response.status === 401 || await isStarting(response);
+        await response.body?.cancel();
+      } else {
+        // App listening precedes seedAdmin/provisionInitialProject completion.
+        // Never use a config PUT (or a Task) to probe that initialization window.
+        result.retryable = false;
+        const projects = await response.json();
+        if (!Array.isArray(projects?.projects) || !projects.projects.every((p) => p && typeof p.projectId === "string")) {
+          throw new Error("invalid_project_inventory");
+        }
+        result.retryable = true;
+        if (projects.projects.some((p) => p.projectId === projectId)) {
+          result.stage = "agent_config";
+          const config = await request(`/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/config`);
+          result.http_status = config?.status ?? null;
+          if (config !== null) {
+            if (config.status !== 200) {
+              result.retryable = config.status === 401 || config.status === 404 || await isStarting(config);
+              await config.body?.cancel();
+            } else {
+              result.retryable = false;
+              const view = await config.json();
+              const expected = path.resolve(root, projectId, "agents", agentId, "agent_state");
+              result.ready = view?.config !== null && typeof view?.config === "object" && !Array.isArray(view.config)
+                && typeof view.stateDir === "string" && path.resolve(view.stateDir) === expected;
+            }
+          }
+        }
+      }
     }
   } catch {
     // Never copy response bodies, credentials, or arbitrary transport errors to logs.
   }
+  // Parsing/validating a response also consumes the original startup allowance.
+  if (targeted && result.ready && Date.now() >= deadline) {
+    result.ready = false;
+    result.retryable = true;
+  }
   out(result);
-  if (!result.ready) process.exitCode = 1;
+  if (!result.ready) process.exitCode = targeted && !result.retryable ? 2 : 1;
 }
 
 async function api(root, method, apiPath, body) {
@@ -167,25 +216,23 @@ async function api(root, method, apiPath, body) {
 
 // Sets the Agent's max_turns (system_config.yaml) through the Agent config API, which
 // changes that one key and keeps the rest of the stock config, then reads it back.
-// Exits non-zero unless the value read back is the one requested. Right after boot, and
-// sooner under load, the server can answer before it has created the stock Agent: the
-// config API then says 404, so a 404 is retried for up to a minute.
+// Exits non-zero unless the value read back is the one requested. Target readiness
+// must precede this operation. A failed/ambiguous mutation is never retried.
 async function setMaxTurns(root, projectId, agentId, value) {
   const result = { requested: Number(value) };
   const configPath = `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/config`;
   try {
-    let put;
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      put = await api(root, "PUT", configPath, { config: { maxTurns: Number(value) } });
-      if (put.status !== 404) break;
-      await sleep(1000);
+    const put = await apiOnce(root, "PUT", configPath, { config: { maxTurns: Number(value) } });
+    result.put_status = put?.status ?? null;
+    await put?.body?.cancel();
+    if (put?.ok) {
+      const get = await apiOnce(root, "GET", configPath);
+      result.get_status = get?.status ?? null;
+      if (get?.ok) result.max_turns = (await get.json())?.config?.maxTurns ?? null;
+      else await get?.body?.cancel();
     }
-    result.put_status = put.status;
-    const get = await api(root, "GET", configPath);
-    result.get_status = get.status;
-    if (get.ok) result.max_turns = (await get.json())?.config?.maxTurns ?? null;
-  } catch (err) {
-    result.error = err instanceof Error ? err.message : String(err);
+  } catch {
+    result.error = "agent_config_update_unavailable";
   }
   out(result);
   if (result.max_turns !== result.requested) process.exitCode = 1;
@@ -413,7 +460,7 @@ switch (command) {
     runStatus(args[0]);
     break;
   case "ready":
-    await ready(args[0], args[1]);
+    await ready(args[0], args[1], args[2], args[3]);
     break;
   case "abort":
     await abort(args[0], args[1], args[2] ?? "60");
