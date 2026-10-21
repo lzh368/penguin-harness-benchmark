@@ -208,9 +208,29 @@ Only the learned slot and its native version may differ; the reader, selector
 and selection budgets stay fixed. A legal empty batch still needs all five
 Solver contexts and one Evolver with `[]` before compilation/export/sealing.
 
+For an installed guarded Evo group-training profile, the adapter submits the
+initial CLI Task once and then waits read-only across native background-child
+and notice-triggered Tasks. The first CLI idle is not training completion.
+Success requires the training root's profile-bound strict `evo-acceptance.json`
+and all native Sessions/background work idle. Missing acceptance, including
+the gap between child settlement and native notice delivery, keeps waiting;
+the adapter never submits another Task or chooses a training phase. A failed
+acceptance/guard receipt, or a current structural native abort after the root
+becomes idle with no queued follow-up, enters normal cleanup. A root abort may
+leave independent children alive; cleanup stops them without waiting for their
+completion. Unknown evidence can never become success.
+
+This training-only wait and the initial CLI share one absolute `PB_TIMEOUT`
+deadline, fixed before the first run. GNU `timeout` must be available before
+dispatch; its precise remaining hard window bounds the CLI's integer-second
+soft window. The original separate cleanup allowance remains unchanged.
+`penguin/evo-wait-plan.json` and `evo-native-wait.json` record the deadline and
+terminal status without model messages, prompts, credentials or training data.
+Test Targets and other methods retain their existing one-Task lifecycle.
+
 Before collecting trial cost, the adapter checks all Sessions and native
-background children/processes in that trial's private data root. A prematurely
-finished coordinator is recorded as failure and its remaining work is aborted;
+background children/processes in that trial's private data root. Work remaining
+at a real terminal boundary is recorded as failure and aborted;
 unconfirmed shutdown/accounting stays unsettled. The host's own final request
 cannot be included in its report before it finishes, so label that liability
 `pending_final_request` and settle it in a later read-only accounting pass.

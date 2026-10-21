@@ -8,6 +8,13 @@
 //       Exits 1 for bounded startup retry, 2 for a permanent target/auth failure.
 //   node helper.mjs run-status <penguin-run.json>
 //       Prints "<status> <sessionId>" from `penguin run --json` output, or "error -".
+//   node helper.mjs prepare-evo-wait <root> <project> <agent> <start ms> <timeout>
+//       Binds guarded group training to one original absolute deadline, before run.
+//   node helper.mjs evo-wait-window <plan>
+//       Prints the remaining GNU hard timeout and integer CLI soft timeout.
+//   node helper.mjs wait-evo <root> <project> <agent> <rootSession> <plan>
+//       GET-only wait for strict Evo terminal acceptance and native idle, across
+//       background notice Tasks. No receipt is never evidence of completion.
 //   node helper.mjs abort <data root> <sessionId> <wait seconds>
 //       Aborts the session's running Task through the local server and waits until the
 //       session is idle. Prints one JSON line.
@@ -63,6 +70,194 @@ function out(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Only guarded Evo group training spans multiple native Tasks. A CLI Task's
+// first idle is not the terminal experiment boundary; no model/phase is started here.
+function regularJson(file) {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.size > 4 * 1024 * 1024 || fs.realpathSync(file) !== path.resolve(file)) throw new Error("invalid_regular_record");
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+const validNativeId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value);
+const fileSha = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+
+function evoWaitProfile(root, projectId, agentId) {
+  if (!validNativeId(projectId) || !validNativeId(agentId)) throw new Error("invalid_identity");
+  const agent = path.resolve(root, projectId, "agents", agentId);
+  const profilePath = path.join(agent, "agent_state/skills/evo-harness-rsi-toolkit/training.json");
+  const profile = regularJson(profilePath);
+  if (profile.guard_version !== 2 || profile.attempt_id !== "attempt-1" ||
+      !Array.isArray(profile.train_ids) || profile.train_ids.length !== 5 ||
+      !profile.train_ids.every(validNativeId) || new Set(profile.train_ids).size !== 5 ||
+      !path.isAbsolute(profile.private_learning ?? "")) throw new Error("invalid_training_profile");
+  const guard = path.join(agent, "agent_state/hooks/evo-harness-rsi-toolkit/guard.mjs");
+  if (!fs.lstatSync(guard).isFile() || fs.realpathSync(guard) !== guard) throw new Error("missing_training_guard");
+  return { agent, profilePath, profile, profileSha: fileSha(profilePath) };
+}
+
+function prepareEvoWait(root, projectId, agentId, startedMs, timeout) {
+  try {
+    const source = evoWaitProfile(root, projectId, agentId);
+    const match = /^(\d+)s$/.exec(timeout);
+    const start = Number(startedMs), seconds = match ? Number(match[1]) : NaN;
+    if (!Number.isSafeInteger(start) || start <= 0 || !Number.isSafeInteger(seconds) || seconds <= 0 ||
+        !Number.isSafeInteger(start + seconds * 1000)) throw new Error("bounded_training_timeout_required");
+    out({ schema: "penguin-evo-native-wait-v1", root: path.resolve(root), project_id: projectId,
+      agent_id: agentId, training_path: source.profilePath, training_sha256: source.profileSha,
+      started_at_ms: start, deadline_ms: start + seconds * 1000 });
+  } catch {
+    out({ prepared: false, error: "invalid_guarded_training_wait_configuration" });
+    process.exitCode = 2;
+  }
+}
+
+function evoWaitWindow(planPath) {
+  try {
+    const plan = regularJson(planPath);
+    const remaining = plan.deadline_ms - Date.now();
+    if (plan.schema !== "penguin-evo-native-wait-v1" || !(remaining > 0)) throw new Error("expired");
+    // GNU timeout enforces the precise remaining window, including CLI startup.
+    // Round the CLI's integer-only soft window UP so it cannot end up to 999 ms
+    // early; the hard window still ends at the original deadline.
+    process.stdout.write(`${remaining / 1000}s ${Math.ceil(remaining / 1000)}s\n`);
+  } catch { process.exitCode = 124; }
+}
+
+// An aborted auto-resumed Task may cancel its script stop hook before that hook
+// writes acceptance. Only native structural events from the exact root Session
+// can classify this as failure. Never infer completion from trace text.
+function nativeRootAborted(agent, sessionId) {
+  const traceRoot = path.join(agent, "traces");
+  if (!fs.existsSync(traceRoot)) return false;
+  const candidates = [];
+  const pattern = new RegExp(`^${sessionId}_(\\d+)\\.jsonl$`);
+  const visit = (dir, depth) => {
+    if (depth > 2 || fs.lstatSync(dir).isSymbolicLink()) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) visit(path.join(dir, entry.name), depth + 1);
+      else if (entry.isFile()) {
+        const match = pattern.exec(entry.name);
+        if (match) candidates.push({ file: path.join(dir, entry.name), segment: Number(match[1]) });
+      }
+    }
+  };
+  visit(traceRoot, 0);
+  candidates.sort((a, b) => b.segment - a.segment);
+  if (!candidates.length) return false;
+  const fd = fs.openSync(candidates[0].file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const size = fs.fstatSync(fd).size;
+    const cap = 1024 * 1024;
+    const head = Buffer.alloc(Math.min(size, cap));
+    fs.readSync(fd, head, 0, head.length, 0);
+    const firstLine = head.toString("utf8").split("\n")[0];
+    const meta = JSON.parse(firstLine);
+    if (meta.type !== "session_meta" || meta.origin?.length || meta.payload?.session_id !== sessionId ||
+        path.resolve(meta.payload?.agent_state ?? "") !== path.join(agent, "agent_state")) return false;
+    const offset = Math.max(0, size - cap);
+    const tail = Buffer.alloc(size - offset);
+    fs.readSync(fd, tail, 0, tail.length, offset);
+    const lines = tail.toString("utf8").split("\n");
+    if (offset) lines.shift(); // A truncated first row cannot prove an event.
+    let aborted = false, sawRequest = false;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let row;
+      try { row = JSON.parse(line); } catch { return false; }
+      if (row.origin?.length || row.type !== "event_msg") continue;
+      if (row.payload?.type === "request_begin") { aborted = false; sawRequest = true; }
+      if (row.payload?.type === "abort" && sawRequest) aborted = true;
+    }
+    return aborted;
+  } finally { fs.closeSync(fd); }
+}
+
+async function waitEvo(root, projectId, agentId, sessionId, planPath) {
+  const started = Date.now();
+  const receipt = { status: "unsettled", terminal: false, native_sessions_idle: false,
+    snapshots: 0, waited_ms: 0, model_calls: 0, task_requests: 0 };
+  let deadline = 0;
+  const check = (value) => { if (!value) throw new Error("invalid_native_wait_evidence"); };
+  const remaining = () => {
+    const value = deadline - Date.now();
+    if (!(value > 0)) throw new Error("training_deadline");
+    return Math.min(3000, value);
+  };
+  async function get(route) {
+    const response = await apiOnce(root, "GET", route, undefined, remaining());
+    check(response?.ok);
+    const result = await response.json();
+    remaining(); // A late response body must not certify success beyond the deadline.
+    return result;
+  }
+  try {
+    const source = evoWaitProfile(root, projectId, agentId);
+    const plan = regularJson(planPath);
+    check(validNativeId(sessionId) && plan.schema === "penguin-evo-native-wait-v1" &&
+      plan.root === path.resolve(root) && plan.project_id === projectId && plan.agent_id === agentId &&
+      plan.training_path === source.profilePath && plan.training_sha256 === source.profileSha &&
+      Number.isSafeInteger(plan.deadline_ms) && plan.deadline_ms > plan.started_at_ms);
+    deadline = plan.deadline_ms;
+    receipt.deadline_ms = deadline;
+    const scratch = path.join(source.agent, "scratchpad", sessionId);
+    for (;;) {
+      remaining();
+      check(fileSha(source.profilePath) === source.profileSha);
+      const acceptancePath = path.join(scratch, "evo-acceptance.json");
+      const blockedPath = path.join(scratch, "evo-hook-blocked.json");
+      let terminal = null;
+      if (fs.existsSync(blockedPath)) {
+        regularJson(blockedPath);
+        terminal = false;
+      } else if (fs.existsSync(acceptancePath)) {
+        const mode = regularJson(path.join(scratch, "EVO_CONTROL.json"));
+        check(mode.schema === 2 && mode.mode === "training" && mode.session_id === sessionId &&
+          mode.training_path === source.profilePath && mode.training_sha256 === source.profileSha &&
+          mode.private_learning === source.profile.private_learning);
+        const accepted = regularJson(acceptancePath);
+        if (accepted.complete === true && /^[0-9a-f]{64}$/.test(accepted.skill_sha256)) terminal = true;
+        else if (accepted.complete === false && accepted.status === "method_failed") terminal = false;
+        else throw new Error("invalid_terminal_acceptance");
+      }
+      const sessions = await nativeTrialSessions(get, projectId, sessionId);
+      const idle = sessions.every((session) => session.status === "idle" && !session.queued &&
+        !session.background.processes && !session.background.subagents);
+      receipt.snapshots++;
+      receipt.native_sessions_idle = idle;
+      remaining();
+      const rootSession = sessions.find((session) => session.id === sessionId);
+      // A root abort does not abort its independent background children. Once
+      // the root itself is idle, a structural abort is a failure boundary and
+      // the existing quiesce cleanup must stop those children without delay.
+      const aborted = terminal === null && rootSession.status === "idle" && !rootSession.queued &&
+        nativeRootAborted(source.agent, sessionId);
+      remaining(); // Synchronous trace reads are inside the same absolute window.
+      if (aborted) {
+        receipt.status = "method_failed"; receipt.terminal = true;
+        receipt.native_abort = true; process.exitCode = 5; break;
+      }
+      if (terminal === false) {
+        // A true failed terminal is a cleanup boundary, even if cleanup must stop
+        // children from a cutoff. It never becomes a successful completion.
+        receipt.status = "method_failed"; receipt.terminal = true; process.exitCode = 5; break;
+      }
+      if (terminal === true && idle) {
+        receipt.status = "completed"; receipt.terminal = true; break;
+      }
+      // Missing acceptance is still pending even in the child-settle -> notice
+      // delivery gap. Only the strict stop hook creates a terminal acceptance.
+      await sleep(Math.min(250, remaining()));
+    }
+  } catch {
+    const timedOut = deadline > 0 && Date.now() >= deadline;
+    receipt.status = timedOut ? "timed_out" : "unsettled";
+    receipt.error = timedOut ? "original_training_deadline_reached" : "could_not_verify_native_training_terminal";
+    process.exitCode = timedOut ? 124 : 6;
+  }
+  receipt.waited_ms = Date.now() - started;
+  out(receipt);
 }
 
 function runStatus(file) {
@@ -263,6 +458,31 @@ async function abort(root, sessionId, waitSeconds) {
   out(result);
 }
 
+// One shared parser for passive waiting and terminal cleanup. Native SessionService
+// omits backgroundTasks for zero counts; subagent rows alone are not live state.
+async function nativeTrialSessions(get, projectId, rootSessionId) {
+  const check = (value) => { if (!value) throw new Error("invalid_native_session_listing"); };
+  const agents = await get(`/api/projects/${encodeURIComponent(projectId)}/agents`);
+  check(Array.isArray(agents.agents));
+  const sessions = [];
+  for (const agent of agents.agents) {
+    check(validNativeId(agent.agentId));
+    const listing = await get(`/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agent.agentId)}/sessions`);
+    check(Array.isArray(listing.sessions));
+    for (const session of listing.sessions) {
+      check(validNativeId(session.sessionId) && session.projectId === projectId && session.agentId === agent.agentId);
+      check(["idle", "running", "compacting"].includes(session.status));
+      const background = session.backgroundTasks === undefined ? { processes: 0, subagents: 0 } : session.backgroundTasks;
+      const queued = session.pendingFollowUpCount ?? 0;
+      check(background && [background.processes, background.subagents, queued].every((n) => Number.isInteger(n) && n >= 0));
+      sessions.push({ id: session.sessionId, status: session.status, background, queued });
+    }
+  }
+  check(rootSessionId === "-" || sessions.some((session) => session.id === rootSessionId));
+  check(new Set(sessions.map((session) => session.id)).size === sessions.length);
+  return sessions;
+}
+
 async function quiesce(root, projectId, rootSessionId, waitSeconds) {
   const started = Date.now();
   const deadline = started + Number(waitSeconds) * 1000;
@@ -283,25 +503,7 @@ async function quiesce(root, projectId, rootSessionId, waitSeconds) {
     return response;
   }
   async function snapshot() {
-    const agents = await (await request("GET", `/api/projects/${encodeURIComponent(projectId)}/agents`)).json();
-    requireValue(Array.isArray(agents.agents));
-    const sessions = [];
-    for (const agent of agents.agents) {
-      requireValue(validId(agent.agentId));
-      // No category/counts filter: native filtered lists deliberately omit subagents.
-      const listing = await (await request("GET", `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agent.agentId)}/sessions`)).json();
-      requireValue(Array.isArray(listing.sessions));
-      for (const session of listing.sessions) {
-        requireValue(validId(session.sessionId) && session.projectId === projectId && session.agentId === agent.agentId);
-        requireValue(["idle", "running", "compacting"].includes(session.status));
-        const background = session.backgroundTasks ?? { processes: 0, subagents: 0 };
-        const queued = session.pendingFollowUpCount ?? 0;
-        requireValue([background.processes, background.subagents, queued].every((n) => Number.isInteger(n) && n >= 0));
-        sessions.push({ id: session.sessionId, status: session.status, background, queued });
-      }
-    }
-    requireValue(rootSessionId === "-" || sessions.some((s) => s.id === rootSessionId));
-    requireValue(new Set(sessions.map((s) => s.id)).size === sessions.length);
+    const sessions = await nativeTrialSessions(async (route) => (await request("GET", route)).json(), projectId, rootSessionId);
     result.sessions_checked = sessions.length;
     return sessions;
   }
@@ -458,6 +660,15 @@ switch (command) {
     break;
   case "run-status":
     runStatus(args[0]);
+    break;
+  case "prepare-evo-wait":
+    prepareEvoWait(args[0], args[1], args[2], args[3], args[4]);
+    break;
+  case "evo-wait-window":
+    evoWaitWindow(args[0]);
+    break;
+  case "wait-evo":
+    await waitEvo(args[0], args[1], args[2], args[3], args[4]);
     break;
   case "ready":
     await ready(args[0], args[1], args[2], args[3]);

@@ -75,11 +75,27 @@ QUIESCENT=false
 COST_STATUS="unavailable"
 PROCESS_CLEANUP="pending"
 CONFIG_READY="$SERVER_READY"
+EVO_TRAINING=false
 # Optional turn cap: the stock Agent's max_turns, set through the Agent config API. A
 # requested cap that cannot be applied skips the run instead of running uncapped.
 if [ "$SERVER_READY" = true ] && [ -n "${PB_MAX_TURNS:-}" ]; then
   if ! "$NODE" "$HELPER" set-max-turns "$PENGUIN_HOME" "$PB_PROJECT" "$PB_AGENT" "$PB_MAX_TURNS" \
     >"$OUT/penguin/max-turns.json" 2>&1; then
+    CONFIG_READY=false
+    RUN_RC=4
+    STATUS="config_failed"
+  fi
+fi
+# Only the installed guarded continuous-training profile spans several native
+# Tasks. Freeze its original timeout before the first CLI call; test Targets and
+# other methods keep the existing one-Task adapter behavior.
+EVO_PROFILE="$PENGUIN_HOME/$PB_PROJECT/agents/$PB_AGENT/agent_state/skills/evo-harness-rsi-toolkit/training.json"
+if [ "$CONFIG_READY" = true ] && { [ -e "$EVO_PROFILE" ] || [ -L "$EVO_PROFILE" ]; }; then
+  if command -v timeout >/dev/null && timeout --version 2>/dev/null | grep -q 'GNU coreutils' && \
+    "$NODE" "$HELPER" prepare-evo-wait "$PENGUIN_HOME" "$PB_PROJECT" "$PB_AGENT" "$(now_ms)" "${PB_TIMEOUT:-}" \
+    >"$OUT/penguin/evo-wait-plan.json" 2>/dev/null; then
+    EVO_TRAINING=true
+  else
     CONFIG_READY=false
     RUN_RC=4
     STATUS="config_failed"
@@ -99,7 +115,21 @@ if [ "$CONFIG_READY" = true ]; then
   if [ -n "${PB_TIMEOUT:-}" ]; then
     TIMEOUT_ARGS=(--timeout "$PB_TIMEOUT")
   fi
-  "$PENGUIN" run -m "$(cat "$PB_PREFIX/instruction.md")" \
+  RUN_WRAPPER=()
+  WINDOW_READY=true
+  if [ "$EVO_TRAINING" = true ]; then
+    WINDOW="$("$NODE" "$HELPER" evo-wait-window "$OUT/penguin/evo-wait-plan.json")"
+    if [ "$?" -eq 0 ]; then
+      read -r HARD_WINDOW CLI_WINDOW <<<"$WINDOW"
+      RUN_WRAPPER=(timeout --signal=TERM --kill-after=5 "$HARD_WINDOW")
+      TIMEOUT_ARGS=(--timeout "$CLI_WINDOW")
+    else
+      WINDOW_READY=false
+      RUN_RC=124
+    fi
+  fi
+  if [ "$WINDOW_READY" = true ]; then
+  "${RUN_WRAPPER[@]}" "$PENGUIN" run -m "$(cat "$PB_PREFIX/instruction.md")" \
     --workspace "$WORKSPACE" \
     --project-id "$PB_PROJECT" --agent-id "$PB_AGENT" \
     --provider "$PB_PROVIDER" --model-id "$PB_MODEL" \
@@ -110,6 +140,27 @@ if [ "$CONFIG_READY" = true ]; then
   read -r STATUS SESSION_ID <<EOF
 $("$NODE" "$HELPER" run-status "$OUT/penguin-run.json")
 EOF
+  fi
+  if [ "$EVO_TRAINING" = true ] && [ "$RUN_RC" -eq 124 ]; then
+    STATUS="running"
+    RUN_RC=0
+    TIMED_OUT=true
+  elif [ "$EVO_TRAINING" = true ] && [ "$STATUS" = "completed" ] && [ "$SESSION_ID" != "-" ]; then
+    "$NODE" "$HELPER" wait-evo "$PENGUIN_HOME" "$PB_PROJECT" "$PB_AGENT" "$SESSION_ID" "$OUT/penguin/evo-wait-plan.json" \
+      >"$OUT/penguin/evo-native-wait.json" 2>/dev/null
+    EVO_WAIT_RC=$?
+    if [ "$EVO_WAIT_RC" -eq 124 ]; then
+      STATUS="running"
+      RUN_RC=0
+      TIMED_OUT=true
+    elif [ "$EVO_WAIT_RC" -eq 5 ]; then
+      STATUS="method_failed"
+      RUN_RC=5
+    elif [ "$EVO_WAIT_RC" -ne 0 ]; then
+      STATUS="method_failed_unsettled"
+      RUN_RC=6
+    fi
+  fi
   # 3. A soft timeout leaves the Task running. Root completion can also leave native
   #    background children running: ordinary child Session rows do not expose this.
   #    One bounded cleanup checks parent background counts and uses native stop APIs.
