@@ -17,6 +17,8 @@ MODE_POLICY = "public-0755-0644-v1"
 PUBLIC_TOP_LEVEL = {"bin", "npm", "node", "cli-build.json", "native-plugin-probe.json", "bundle.json"}
 PRIVATE_NAMES = {".git", ".vault.toml", ".project_config.toml", ".npmrc", ".netrc", ".pypirc",
                  "api-token", "server.lock", ".env"}
+OFFICIAL_EMPTY_NPMRC = "node/lib/node_modules/npm/.npmrc"
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def require(value, message):
@@ -69,13 +71,19 @@ def inventory(root, exclude=(), normalize_modes=False, include_directories=False
         directories[""] = 0o755 if normalize_modes else root.stat().st_mode & 0o7777
     for path in sorted(root.rglob("*")):
         name = path.relative_to(root).as_posix()
+        info = path.lstat()
+        mode = info.st_mode
         if public:
             require(name.split("/", 1)[0] in PUBLIC_TOP_LEVEL, f"unexpected public bundle root entry: {name}")
-            require(not any(part.lower() in PRIVATE_NAMES or part.lower().startswith(".env.")
-                            for part in path.relative_to(root).parts), f"private file cannot enter public bundle: {name}")
+            private = any(part.lower() in PRIVATE_NAMES or part.lower().startswith(".env.")
+                          for part in path.relative_to(root).parts)
+            # The checksum-verified official Node distribution contains this
+            # empty npm default. No other npmrc, content or symlink is public.
+            require(not private or (name == OFFICIAL_EMPTY_NPMRC and stat.S_ISREG(mode)
+                                    and info.st_size == 0 and sha(path) == EMPTY_SHA256),
+                    f"private file cannot enter public bundle: {name}")
         if name in exclude:
             continue
-        mode = path.lstat().st_mode
         if stat.S_ISLNK(mode):
             require(path.resolve().is_relative_to(root) and path.exists(), f"external or broken symlink: {name}")
             target = os.readlink(path)

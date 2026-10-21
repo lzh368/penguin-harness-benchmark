@@ -154,6 +154,9 @@ class SourceBundleTests(unittest.TestCase):
             old_umask = os.umask(0o077)
             try:
                 source, root, plugin, commit, node, git_fixture = self.make_record_fixture(temp)
+                npmrc = root / bundle.OFFICIAL_EMPTY_NPMRC
+                npmrc.parent.mkdir(parents=True)
+                npmrc.write_bytes(b"")
                 # Match the builder's real archive root while retaining source
                 # and the synthetic shared store outside it.
                 stage = temp / "stage"
@@ -175,6 +178,8 @@ class SourceBundleTests(unittest.TestCase):
                 with patch.object(bundle, "check_source"), patch.object(bundle, "git", side_effect=git_fixture):
                     bundle.record(source, commit, root, node)
                 self.assertTrue(bundle.verify_staged(root, commit)["verified"])
+                self.assertEqual(bundle.read(root / "bundle.json")["payload"]["files"][bundle.OFFICIAL_EMPTY_NPMRC],
+                                 {"sha256": bundle.EMPTY_SHA256, "mode": 0o644})
                 with self.assertRaisesRegex(ValueError, "permissions differ|payload changed"):
                     bundle.verify(root, commit)
                 archive = temp / "public.tar.gz"
@@ -195,11 +200,15 @@ class SourceBundleTests(unittest.TestCase):
                         elif member.isfile() or member.islnk():self.assertIn(member.mode, (0o644, 0o755))
                     self.assertEqual(packed.getmember("penguin-bench/bin/probe").mode, 0o755)
                     self.assertEqual(packed.getmember("penguin-bench/bundle.json").mode, 0o644)
+                    empty_config = packed.getmember("penguin-bench/" + bundle.OFFICIAL_EMPTY_NPMRC)
+                    self.assertTrue(empty_config.isfile())
+                    self.assertEqual((empty_config.size, empty_config.mode), (0, 0o644))
                 extracted = temp / "extracted"
                 extracted.mkdir()
                 subprocess.run(["tar", "-xzf", str(archive), "--same-permissions", "--no-same-owner", "-C", str(extracted)], check=True)
                 published = extracted / "penguin-bench"
                 self.assertTrue(bundle.verify(published, commit)["verified"])
+                self.assertEqual((published / bundle.OFFICIAL_EMPTY_NPMRC).read_bytes(), b"")
                 # Real non-root process reads every public file and executes
                 # the public binary. In root CI only this synthetic tree is
                 # traversable to nobody; normal runs already use a non-root UID.
@@ -214,6 +223,30 @@ class SourceBundleTests(unittest.TestCase):
                     bundle.verify(published, commit)
             finally:
                 os.umask(old_umask)
+
+    def test_official_empty_npmrc_exception_is_exact_regular_and_empty(self):
+        cases = ("nonempty", "newline", "symlink", "directory", "fifo", "other-npm", "other-root", "case")
+        for mutation in cases:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(prefix="synthetic-npmrc-") as temp:
+                source, root, plugin, commit, node, git_fixture = self.make_record_fixture(temp)
+                name = {"other-npm": "node/lib/node_modules/other/.npmrc",
+                        "other-root": "npm/lib/node_modules/npm/.npmrc",
+                        "case": "node/lib/node_modules/npm/.NPMRC"}.get(mutation, bundle.OFFICIAL_EMPTY_NPMRC)
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if mutation == "symlink":
+                    (path.parent / "empty-public-file").write_bytes(b"")
+                    path.symlink_to("empty-public-file")
+                elif mutation == "directory":
+                    path.mkdir()
+                elif mutation == "fifo":
+                    os.mkfifo(path)
+                else:
+                    path.write_bytes(b"SYNTHETIC token" if mutation == "nonempty" else b"\n" if mutation == "newline" else b"")
+                with patch.object(bundle, "check_source"), patch.object(bundle, "git", side_effect=git_fixture), \
+                        self.assertRaisesRegex(ValueError, "private file"):
+                    bundle.record(source, commit, root, node)
+                self.assertFalse((root / "bundle.json").exists())
 
     def test_public_inventory_refuses_private_files_and_unrelocatable_links(self):
         for filename in (".env", ".env.production", ".vault.toml", ".project_config.toml", "api-token", ".npmrc"):

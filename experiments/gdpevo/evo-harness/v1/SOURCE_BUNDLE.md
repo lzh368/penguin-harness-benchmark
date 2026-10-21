@@ -42,7 +42,13 @@ broken dependency symlink fails the build; absolute symlinks are also refused
 because they would retain the private staging path after relocation. Only the
 public `bin`, `npm`, `node` trees and build receipts enter the archive. Secret
 stores, API tokens, local authentication files, Git metadata, and `.env` files
-are rejected even inside a dependency package.
+are rejected even inside a dependency package. The sole `.npmrc` exception is
+`node/lib/node_modules/npm/.npmrc`, shipped empty by the checksum-verified
+official Node `24.20.0` distribution: it must be a regular file of exactly zero
+bytes, with SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+Nonempty content, symlinks, directories, other paths and case variants remain
+rejected. This empty file is sealed and verified like every other payload file.
 
 Public permissions are independent of the build operator's umask: every
 archived directory is `0755`; executable regular files are `0755`, other regular
