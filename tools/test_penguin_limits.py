@@ -187,6 +187,12 @@ elif command == 'set-max-turns': print(json.dumps({'max_turns':int(args[-1])}))
 elif command == 'run-status':
     result=json.loads(Path(args[0]).read_text()); print(result['status'],result['sessionId'])
 elif command == 'abort': print('{"aborted":true,"status":"idle"}')
+elif command == 'quiesce':
+    active = os.environ['FIXTURE_STATUS'] == 'running'
+    print(json.dumps({'native_sessions_idle': True, 'had_active': active}))
+    sys.exit(5 if active else 0)
+elif command == 'verify-cost': print('{"valid":true}')
+elif command == 'verify-stop': print('{"valid":true}')
 elif command == 'outcome': Path(args[0]).write_text(args[1])
 elif command == 'redact': print('{"redacted":0}')
 else: raise SystemExit('unexpected helper command: '+command)
@@ -230,9 +236,34 @@ else: raise SystemExit('unexpected penguin command: '+repr(args))
         with tempfile.TemporaryDirectory() as tmp:
             logs, args = self.run_shell(Path(tmp), '900s', 'running')
             self.assertEqual(args[args.index('--timeout') + 1], '900s')
-            self.assertTrue(json.loads((logs / 'penguin/abort.json').read_text())['aborted'])
+            self.assertTrue(json.loads((logs / 'penguin/quiescence.json').read_text())['had_active'])
+            self.assertTrue(json.loads((logs / 'penguin/quiescence.json').read_text())['native_sessions_idle'])
             self.assertTrue(json.loads((logs / 'penguin-outcome.json').read_text())['timed_out'])
             self.assertTrue((logs / 'penguin/traces/solver/trace.jsonl').is_file())
+
+    def test_quiescence_and_unknown_cost_survive_harbor_metadata_population(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, _, _ = self.make_agent(Path(tmp))
+            agent.logs_dir.mkdir(parents=True, exist_ok=True)
+            agent._scrub_host_logs = lambda: 0
+            agent._register_late_scrub = lambda: None
+            (agent.logs_dir / 'penguin-outcome.json').write_text(json.dumps({
+                'status': 'method_failed_unsettled', 'exit_code': 6, 'native_sessions_idle': False,
+                'cost_status': 'unsettled', 'timed_out': False, 'server_ready': True,
+            }))
+            # Even an observed partial usage record cannot prove final cost while
+            # child termination is unknown. It remains useful as a lower bound.
+            (agent.logs_dir / 'penguin-cost-by-session.json').write_text(json.dumps({
+                'groups': [{'cost': 0.125, 'hasUncosted': False, 'requests': 1, 'output': 10}],
+            }))
+            context = AgentContext()
+            agent.populate_context_post_run(context)
+            self.assertIsNone(context.cost_usd)
+            self.assertEqual(context.metadata['status'], 'method_failed_unsettled')
+            self.assertFalse(context.metadata['native_sessions_idle'])
+            self.assertFalse(context.metadata['cost_complete'])
+            self.assertEqual(context.metadata['cost_status'], 'unsettled')
+            self.assertEqual(context.metadata['cost_priced_usd'], 0.125)
 
 
 if __name__ == '__main__':

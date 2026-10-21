@@ -10,6 +10,15 @@
 //   node helper.mjs abort <data root> <sessionId> <wait seconds>
 //       Aborts the session's running Task through the local server and waits until the
 //       session is idle. Prints one JSON line.
+//   node helper.mjs quiesce <data root> <projectId> <rootSessionId> <wait seconds>
+//       Checks all native Sessions and root background tasks in this trial's private root.
+//       Aborts leftover work through native APIs within one cleanup deadline; never
+//       submits messages/tasks. Exits 0 if initially idle, 5 if aborted to idle, 6 if
+//       idle cannot be verified. Only native idle permits a final usage read. This
+//       does not prove leaf OS processes ended; server shutdown disposes those later.
+//   node helper.mjs verify-cost <session-cost.json> <model-cost.json>
+//       Checks both native cost responses are JSON group lists. Does not assert that
+//       every request is priced; the native hasUncosted fields remain authoritative.
 //   node helper.mjs set-max-turns <data root> <projectId> <agentId> <n>
 //       Sets the Agent's max_turns through the local server and reads it back. Prints one
 //       JSON line; exits 1 when the value read back differs.
@@ -38,6 +47,26 @@ function runStatus(file) {
   } catch {
     process.stdout.write("error -\n");
   }
+}
+
+function verifyCost(files) {
+  let valid = files.length === 2;
+  try {
+    for (const file of files) {
+      const value = JSON.parse(fs.readFileSync(file, "utf8"));
+      valid &&= value !== null && typeof value === "object" && Array.isArray(value.groups) &&
+        value.groups.every((group) => group !== null && typeof group === "object" && !Array.isArray(group));
+    }
+  } catch { valid = false; }
+  out({ valid });
+  if (!valid) process.exitCode = 1;
+}
+
+function verifyStop(file) {
+  let valid = false;
+  try { valid = JSON.parse(fs.readFileSync(file, "utf8")).ok === true; } catch { /* no receipt */ }
+  out({ valid });
+  if (!valid) process.exitCode = 1;
 }
 
 function readOr(file, fallback) {
@@ -161,6 +190,121 @@ async function abort(root, sessionId, waitSeconds) {
   out(result);
 }
 
+async function quiesce(root, projectId, rootSessionId, waitSeconds) {
+  const started = Date.now();
+  const deadline = started + Number(waitSeconds) * 1000;
+  const result = { native_sessions_idle: false, had_active: false, sessions_checked: 0, abort_requests: 0, waited_ms: 0 };
+  const validId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value);
+  const requireValue = (value) => { if (!value) throw new Error("invalid_quiescence_response"); };
+  const remaining = () => {
+    const ms = deadline - Date.now();
+    if (!(ms > 0)) throw new Error("quiescence_deadline");
+    return Math.max(1, Math.min(3000, Math.ceil(ms)));
+  };
+  async function request(method, route) {
+    const response = await apiOnce(root, method, route, undefined, remaining());
+    if (response === null || !response.ok) {
+      await response?.body?.cancel();
+      throw new Error("quiescence_api_failed");
+    }
+    return response;
+  }
+  async function snapshot() {
+    const agents = await (await request("GET", `/api/projects/${encodeURIComponent(projectId)}/agents`)).json();
+    requireValue(Array.isArray(agents.agents));
+    const sessions = [];
+    for (const agent of agents.agents) {
+      requireValue(validId(agent.agentId));
+      // No category/counts filter: native filtered lists deliberately omit subagents.
+      const listing = await (await request("GET", `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agent.agentId)}/sessions`)).json();
+      requireValue(Array.isArray(listing.sessions));
+      for (const session of listing.sessions) {
+        requireValue(validId(session.sessionId) && session.projectId === projectId && session.agentId === agent.agentId);
+        requireValue(["idle", "running", "compacting"].includes(session.status));
+        const background = session.backgroundTasks ?? { processes: 0, subagents: 0 };
+        const queued = session.pendingFollowUpCount ?? 0;
+        requireValue([background.processes, background.subagents, queued].every((n) => Number.isInteger(n) && n >= 0));
+        sessions.push({ id: session.sessionId, status: session.status, background, queued });
+      }
+    }
+    requireValue(rootSessionId === "-" || sessions.some((s) => s.id === rootSessionId));
+    requireValue(new Set(sessions.map((s) => s.id)).size === sessions.length);
+    result.sessions_checked = sessions.length;
+    return sessions;
+  }
+  async function liveState(id) {
+    // Child Session list rows may say idle while their parent's runtime is executing
+    // them. The native stream's initial task_state is authoritative for live children.
+    const response = await request("GET", `/api/sessions/${encodeURIComponent(id)}/stream`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    try {
+      while (text.length < 256 * 1024) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        text += decoder.decode(chunk.value, { stream: true }).replace(/\r\n/g, "\n");
+        for (let boundary; (boundary = text.indexOf("\n\n")) >= 0;) {
+          const frame = text.slice(0, boundary);
+          text = text.slice(boundary + 2);
+          const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+          if (!data) continue;
+          const event = JSON.parse(data);
+          if (event.type === "task_state") return event;
+        }
+      }
+      throw new Error("missing_native_task_state");
+    } finally { await reader.cancel(); }
+  }
+  const sent = new Set();
+  async function stopOnce(method, route) {
+    if (sent.has(route)) return;
+    const response = await request(method, route);
+    await response.body?.cancel();
+    sent.add(route);
+    result.abort_requests += 1;
+  }
+  try {
+    requireValue(validId(projectId) && (rootSessionId === "-" || validId(rootSessionId)) && Number(waitSeconds) > 0);
+    while (Date.now() < deadline) {
+      const sessions = await snapshot();
+      const active = sessions.filter((s) => s.status !== "idle" || s.queued || s.background.subagents || s.background.processes);
+      if (active.length === 0) { result.native_sessions_idle = true; break; }
+      result.had_active = true;
+      for (const session of active) {
+        const base = `/api/sessions/${encodeURIComponent(session.id)}`;
+        if (session.background.subagents || session.queued) {
+          const live = await liveState(session.id);
+          for (const follow of live.pendingFollowUps ?? []) {
+            requireValue(validId(follow.id));
+            await stopOnce("DELETE", `${base}/follow-ups/${encodeURIComponent(follow.id)}`);
+          }
+          for (const child of live.subagents ?? []) {
+            requireValue(validId(child.sessionId) && typeof child.running === "boolean");
+            if (child.running) await stopOnce("POST", `${base}/subagents/${encodeURIComponent(child.sessionId)}/abort`);
+          }
+        }
+        if (session.status !== "idle") await stopOnce("POST", `${base}/abort`);
+        if (session.background.processes) {
+          const info = await (await request("GET", `${base}/processes`)).json();
+          requireValue(Array.isArray(info.processes));
+          for (const process of info.processes) {
+            requireValue(validId(process.processId) && typeof process.running === "boolean");
+            if (process.running) await stopOnce("POST", `${base}/processes/${encodeURIComponent(process.processId)}/kill`);
+          }
+        }
+      }
+      await sleep(Math.max(0, Math.min(250, deadline - Date.now())));
+    }
+  } catch {
+    // Unknown status remains an unpriced liability. Do not leak API bodies or tokens.
+    result.error = "could_not_verify_all_trial_work_idle";
+  }
+  result.waited_ms = Date.now() - started;
+  out(result);
+  process.exitCode = !result.native_sessions_idle ? 6 : result.had_active ? 5 : 0;
+}
+
 // The config is written by PenguinAgent with basic strings only (\" \\ \uXXXX escapes), a
 // subset of JSON string syntax, so JSON.parse decodes the value exactly.
 function apiKeys(configFile) {
@@ -244,6 +388,15 @@ switch (command) {
     break;
   case "abort":
     await abort(args[0], args[1], args[2] ?? "60");
+    break;
+  case "quiesce":
+    await quiesce(args[0], args[1], args[2], args[3] ?? "60");
+    break;
+  case "verify-cost":
+    verifyCost(args);
+    break;
+  case "verify-stop":
+    verifyStop(args[0]);
     break;
   case "set-max-turns":
     await setMaxTurns(args[0], args[1], args[2], args[3]);

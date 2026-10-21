@@ -6,6 +6,14 @@ State, versioned snapshots and `scoreboard.yaml`. Evaluation workers launch
 Harbor; the host Controller alone advances the experiment. `protocol.py`
 performs one model-free file operation; it has no dispatch or scheduling loop.
 
+Method revision `2026.10.21.2` adds native plugin hooks for the continuous
+training contract. They inject the full training role contract, restrict the
+training coordinator to method helpers and native child delegation, and check
+evidence before test dispatch or Goal completion. The main Penguin still
+chooses and calls every native worker. No hook starts a model, Harbor, child or
+replacement Task. Ordinary RSI methods and the shared evaluation protocol are
+unchanged. Install Evo explicitly; it is not a default plugin for other Agents.
+
 `profile.json` is a **draft without spending authorization or a selected model**.
 It fixes ERP task_group_005, five train/five test, one learning pass, one attempt
 per training task, one batch compilation, one test repeat, training concurrency
@@ -54,6 +62,7 @@ API or Harbor run is called. Provide absolute paths. Operations:
 | prepare-trainer | config, repo, evo_tool, base_state (sanitized initialized H0), method_skill, training_budget_usd, host_operation_id, config_sha256, output (new Trainer agent_state) |
 | pack-state | evo_tool, state, output (new tar.gz; archives native State contents) |
 | verify-export | evo_tool, submission, training_export, train_ids, private_learning, trace_root, runtime |
+| verify-freeze | evo_tool, export_request (verify-export JSON), h0_snapshot, final_snapshot (native agent_state/ tar.gz), h0_version, final_version, target_state, test_case_ids, runtime, active_state (h0/final; default final) |
 | matrix | evo_tool, cells (JSON array of unchanged native cell records), case_ids, runs, identity, time, summary_title, summary |
 
 `identity` is agent_id, expected_version, provider, model_id and thinking_level.
@@ -67,6 +76,11 @@ Initialize the H0 Target using Penguin's native CLI and the method's State
 reference. Copy its sanitized State into a separately created Trainer Agent
 using prepare-trainer; snapshot both. The Trainer includes the method and the
 fixed training configuration. Test Target carries only the learned slot.
+The source method must already be natively installed in the Controller State;
+`prepare-trainer` copies its installed `hooks/evo-harness-rsi-toolkit` package
+(or explicit `method_hooks`) and enables only that package in Trainer. H0/final
+Target retain disabled hooks. Native children retain Penguin's normal leaf
+semantics; their evidence is checked by the training root and host.
 Register frozen Benchmarks whose public cases name this adapter revision and
 the unmodified task paths; the original task instructions/graders/split remain
 unchanged. Do not use a mixed job.yaml expecting automatic Skill transfer.
@@ -114,6 +128,15 @@ or held-out test. Reflector/Evolver are native role Sessions, never Codex-writte
 lessons. Codex only starts the root, observes, and addresses explicit infra
 failures. It does not ask a script to choose the next experiment phase.
 
+Follow the installed `references/control.md` for the request schemas. Host
+configuration requires native `read_file` evidence of the full method Skill
+and control reference. Register a worker's exact native call, reserve its
+returned slot/hash in the journal, then invoke `run_subagent` yourself. Keep
+controller overhead reserved. For each held-out phase register and dispatch
+all five workers together. The gates reject unregistered calls, repeated slots,
+runtime changes and tests before verified training/freezing. Missing or failed
+training is `method_failed`; it can never become an empty-library reuse.
+
 ## Export and evidence
 
 Training answers are `/app/submission/answers/train_NNN.json`, learned package
@@ -129,6 +152,12 @@ The sealer verifies full chunk reads, role output hashes, and reconstructs the
 compiled package for an exact comparison. The host `verify-export` repeats these
 checks using the exported logs and traces, even after container paths disappear.
 Trace basenames must be unambiguous; missing evidence blocks publication.
+Each training member uses the immutable attempt identity in installed
+`training.json`. The canonical request/feedback paths are derived from that
+profile, not selected by the caller. Every learning role must be a fresh native
+child of the same training root. Capture rejects visible extra judge probes,
+repeated judging and substituted receipts. This is a cooperative method
+boundary, not a security sandbox against arbitrary hidden code/network calls.
 
 Verify export, install the exact allowed package bytes into native Target State, snapshot,
 pack through agent_state_tar, and compare actual runtime injection receipts.
@@ -136,6 +165,18 @@ Train answers, raw trace, judge output and private scratch never enter test.
 H0-equivalent compilation runs the H0 matrix after training and freezing, then
 reuses it with an explicit reuse label; there is no second measurement or
 claimed improvement.
+Both empty and nonempty packages must pass `verify-freeze`, which repeats the
+complete export audit and compares native snapshots and the live Target.
+Only the learned slot and its native version may differ; the reader, selector
+and selection budgets stay fixed. A legal empty batch still needs all five
+Solver contexts and one Evolver with `[]` before compilation/export/sealing.
+
+Before collecting trial cost, the adapter checks all Sessions and native
+background children/processes in that trial's private data root. A prematurely
+finished coordinator is recorded as failure and its remaining work is aborted;
+unconfirmed shutdown/accounting stays unsettled. The host's own final request
+cannot be included in its report before it finishes, so label that liability
+`pending_final_request` and settle it in a later read-only accounting pass.
 
 Model-free environment probes must check unprivileged uid, inaccessible private
 grader/service files, business loopback, model host reachability, nonallowed

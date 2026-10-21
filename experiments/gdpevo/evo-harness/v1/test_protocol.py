@@ -6,8 +6,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import tempfile
 import unittest
+from unittest.mock import patch
 import protocol
 
 
@@ -120,15 +122,31 @@ class ProtocolTests(unittest.TestCase):
         (base / "AGENTS.md").write_text("SYNTHETIC fixed reader\n")
         here = Path(__file__).resolve().parent
         trainer = self.root / "trainer"
+        # Reproduce the native installer's on-disk package from the real plugin
+        # manifest. Real installPlugin execution is covered by the Penguin TS
+        # integration suite, not claimed by this Python preparation fixture.
+        plugin = Path(self.tool).resolve().parents[3]
+        manifest = protocol.read(plugin / "package.json")
+        hooks = self.root / "installed-method-hooks"
+        hooks.mkdir()
+        shutil.copyfile(plugin / "hooks/guard.mjs", hooks / "guard.mjs")
+        shutil.copyfile(plugin / "icon.svg", hooks / "icon.svg")
+        hook_config = {"name": manifest["name"].split("/")[-1], "description": manifest["description"],
+                       **manifest["penguin"]["hooks"]}
+        (hooks / "hooks.json").write_text(json.dumps(hook_config) + "\n")
         request = {"config": str(here / "profile.json"), "repo": str(here.parents[3]),
                    "evo_tool": self.tool, "base_state": str(base), "output": str(trainer),
-                   "method_skill": str(Path(self.tool).parents[1]), "training_budget_usd": 2,
+                   "method_skill": str(Path(self.tool).parents[1]), "method_hooks": str(hooks), "training_budget_usd": 2,
                    "host_operation_id": "synthetic-training-op",
                    "config_sha256": hashlib.sha256((here / "profile.json").read_bytes()).hexdigest()}
         prepared = protocol.prepare_trainer(request)
         self.assertEqual(prepared["training"]["training_budget_usd"], 2)
         self.assertEqual(prepared["training"]["host_operation_id"], "synthetic-training-op")
         self.assertEqual(prepared["training"]["config_sha256"], request["config_sha256"])
+        self.assertEqual(prepared["training"]["private_learning"], "/logs/agent/evo-harness")
+        self.assertEqual(prepared["training"]["answer_dir"], "/app/submission/answers")
+        self.assertEqual(prepared["training"]["feedback_dir"], "/logs/agent/evo-harness/feedback")
+        self.assertIn("enabled: true", (trainer / "system_config.yaml").read_text())
         archive = self.root / "state.tar.gz"
         protocol.pack_state({"state": str(trainer), "output": str(archive), "evo_tool": self.tool})
         import tarfile
@@ -136,6 +154,8 @@ class ProtocolTests(unittest.TestCase):
             names = f.getnames()
         self.assertIn("skills/evo-harness-learned/select.py", names)
         self.assertIn("skills/evo-harness-rsi-toolkit/training.json", names)
+        self.assertIn("hooks/evo-harness-rsi-toolkit/hooks.json", names)
+        self.assertIn("hooks/evo-harness-rsi-toolkit/guard.mjs", names)
         self.assertNotIn(".vault.toml", names)
         missing_budget = {**request, "output": str(self.root / "missing-budget")}
         missing_budget.pop("training_budget_usd")
@@ -145,6 +165,17 @@ class ProtocolTests(unittest.TestCase):
             protocol.prepare_trainer({**request, "output": str(self.root / "wrong-config"), "config_sha256": "SYNTHETIC-WRONG"})
         with self.assertRaises(ValueError):
             protocol.prepare_trainer({**request, "output": str(self.root / "zero-budget"), "training_budget_usd": 0})
+        paid = {**protocol.read(here / "profile.json"), "paid_authorized": True, "budget_usd": 15,
+                "budget_allocations_usd": {"continuous_training_including_all_children": 5}}
+        paid_path = self.root / "synthetic-paid-config.json"
+        paid_path.write_text(json.dumps(paid))
+        paid_request = {**request, "config": str(paid_path), "config_sha256": protocol.sha(paid_path),
+                        "output": str(self.root / "invalid-paid-trainer")}
+        with self.assertRaisesRegex(ValueError, "exceeds authorized"):
+            protocol.prepare_trainer({**paid_request, "training_budget_usd": 16})
+        with self.assertRaisesRegex(ValueError, "differs from frozen"):
+            protocol.prepare_trainer({**paid_request, "training_budget_usd": 4})
+        self.assertFalse(Path(paid_request["output"]).exists())
         (base / ".vault.toml").write_text("SYNTHETIC forbidden")
         with self.assertRaises(ValueError):
             protocol.prepare_trainer({**request, "output": str(self.root / "another")})
@@ -164,32 +195,62 @@ class ExportEvidenceTests(unittest.TestCase):
         self.private.mkdir(parents=True)
         self.traces.mkdir()
         self.tool = os.environ["EVO_TOOL"]
-        self.evo = protocol.helper(self.tool)
+        self.installed_state = self.run / "agent_state"
+        self.installed_helper = self.installed_state / "skills/evo-harness-rsi-toolkit/scripts/evo.py"
+        self.installed_helper.parent.mkdir(parents=True)
+        shutil.copyfile(self.tool, self.installed_helper)
+        self.evo = protocol.helper(self.installed_helper)
         self.runtime = {"provider": "synthetic", "model_id": "no-model", "thinking_level": "high"}
         self.train = [f"train_{i:03d}" for i in range(1, 6)]
+        self.training = {"guard_version": 2, "train_ids": self.train, "attempt_id": "attempt-1",
+                         "config_sha256": getattr(self, "config_sha256", hashlib.sha256(b"SYNTHETIC frozen protocol").hexdigest()),
+                         "private_learning": str(self.private), "answer_dir": str(self.submission / "answers"),
+                         "feedback_dir": str(self.private / "feedback"), "runtime": self.runtime,
+                         "workspace": str(self.run), "training_budget_usd": 2}
+        self.save(self.installed_helper.parent.parent / "training.json", self.training)
         self.parent = self.traces / "synthetic-parent.jsonl"
+        self.root_binding = {"session_id": "synthetic-training-root", "provider": "synthetic", "model_id": "no-model",
+                             "source": "cli", "agent_state": str(self.installed_state), "workspace": str(self.run)}
         sessions = [f"synthetic-solver-{i}" for i in range(1, 6)]
-        sessions += [f"synthetic-reflector-{i}" for i in range(1, 6)] + ["synthetic-evolver"]
-        self.write_trace(self.parent, [{"type": "event_msg", "payload": {
+        if not getattr(self, "all_success", False):
+            sessions += [f"synthetic-reflector-{i}" for i in range(1, 6)]
+        sessions += ["synthetic-evolver"]
+        self.write_trace(self.parent, [{"type": "session_meta", "payload": self.root_binding}] + [{"type": "event_msg", "payload": {
             "type": "subagent", "session_id": s}} for s in sessions])
         self.contexts, self.capture_requests, self.candidates, self.roles = [], [], [], []
         self.role_text = self.save_text(self.private / "roles.txt", "SYNTHETIC role instructions.\n" + "Read all bounded material.\n" * 180)
         for i, task in enumerate(self.train, 1):
             inp = self.save_text(self.private / f"{task}-input.txt", "SYNTHETIC public task\n" + "fictional record_id value\n" * 200)
             answer = self.save(self.submission / "answers" / f"{task}.json", {"synthetic": True, "answer": i})
-            feedback = {"task_id": task, "attempt_id": "attempt-1", "answer_sha256": self.sha(answer),
-                        "status": "ok", "http_status": 200, "score": 0.5, "correct": False,
-                        "raw_response": '{"score":0.5,"correct":false,"synthetic":true}'}
-            fb = self.save(self.private / f"{task}-feedback.json", feedback)
+            paths = self.evo.judge_paths(self.training, task, "attempt-1")
+            judge_request = {"op": "judge", "split": "train", "task_id": task, "attempt_id": "attempt-1",
+                             "train_ids": self.train, "url": "http://127.0.0.1:9005/api/judge",
+                             "answer": str(answer), "output": paths["output"]}
+            judge_path = self.save(paths["judge_request"], judge_request)
+            with patch.object(self.evo.urllib.request, "build_opener") as opener:
+                response = opener.return_value.open.return_value.__enter__.return_value
+                response.status = 200
+                correct = getattr(self, "all_success", False)
+                response.read.return_value = json.dumps({"score": 1 if correct else 0.5,
+                                                         "correct": correct, "synthetic": True}).encode()
+                feedback = self.evo.judge(judge_request, str(judge_path))
+            fb = Path(paths["output"])
             binding = self.binding(f"synthetic-solver-{i}")
             grant = {"evo_task": {"split": "train", "task_id": task, "attempt_id": "attempt-1", "inputs": [str(inp)]}}
             trace = self.traces / f"synthetic-solver-{i}.jsonl"
             rows = self.trace_rows(binding, [inp], [], json.dumps(grant))
-            rows += self.pair("synthetic-judge", json.dumps(feedback))
+            rows += self.pair("synthetic-judge", json.dumps(self.evo.judge_stdout(feedback)), arguments={
+                "cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(judge_path)])})
+            for offset in range(0, max(len(fb.read_text()), 1), 4000):
+                read_request = self.save(self.private / "requests" / f"read-feedback-{task}-{offset}.json",
+                                         {"op": "read-material", "path": str(fb), "offset": offset})
+                rows += self.pair(f"synthetic-feedback-{offset}", json.dumps(self.evo.material({"path": str(fb), "offset": offset})),
+                                 arguments={"cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(read_request)])})
             self.write_trace(trace, rows)
             ctx = self.private / f"{task}-context.json"
             request = {"op": "capture", "split": "train", "task_id": task, "attempt_id": "attempt-1", "train_ids": self.train,
-                       "answer": str(answer), "feedback": str(fb), "inputs": [str(inp)], "traces": [str(trace)],
+                       "answer": str(answer), "feedback": str(fb), "judge_request": str(judge_path),
+                       "inputs": [str(inp)], "traces": [str(trace)],
                        "binding": binding, "output": str(ctx)}
             self.evo.capture(request)
             self.capture_requests.append(request)
@@ -197,15 +258,16 @@ class ExportEvidenceTests(unittest.TestCase):
             candidate = {"id": f"synthetic-candidate-{i}", "task_id": task, "attempt_id": "attempt-1",
                          "lesson": "SYNTHETIC inspect documented join keys", "trigger": "fictional join task", "scope_hint": "synthetic only",
                          "evidence": [{"kind": "input", "sha256": self.sha(inp), "claim": "SYNTHETIC documented key", "epistemic": "observed"}]}
-            self.candidates.append(candidate)
-            output = self.save(self.private / f"reflector-{i}.json", [candidate])
-            self.roles.append(self.role("reflector", f"synthetic-reflector-{i}", [self.role_text, ctx], output, task))
+            if not correct:
+                self.candidates.append(candidate)
+                output = self.save(self.private / f"reflector-{i}.json", [candidate])
+                self.roles.append(self.role("reflector", f"synthetic-reflector-{i}", [self.role_text, ctx], output, task))
         self.library = self.save(self.private / "prebatch-library.json", [])
         self.candidate_path = self.save(self.private / "candidates.json", self.candidates)
         entry = {"id": "synthetic-join", "level": "topic", "topic": "synthetic", "trigger": "fictional join task",
                  "scope": "synthetic only", "body": "SYNTHETIC inspect documented keys; join rows; report unmatched rows."}
         self.decisions = self.save(self.private / "decisions.json", [{"op": "ADD", "candidate_ids": [c["id"] for c in self.candidates],
-             "reason": "SYNTHETIC shared procedure", "entry": entry}])
+             "reason": "SYNTHETIC shared procedure", "entry": entry}] if self.candidates else [])
         self.roles.append(self.role("evolver", "synthetic-evolver",
                                    [self.role_text, self.candidate_path, self.library] + [Path(p) for p in self.contexts], self.decisions))
         self.limits = {"general": 5, "topic": 5}
@@ -244,7 +306,7 @@ class ExportEvidenceTests(unittest.TestCase):
 
     def binding(self, session):
         return {"session_id": session, "provider": "synthetic", "model_id": "no-model", "source": "subagent",
-                "workspace": str(self.run), "agent_state": "/synthetic/state", "parent_trace": str(self.parent)}
+                "workspace": str(self.run), "agent_state": str(self.installed_state), "parent_trace": str(self.parent)}
 
     @staticmethod
     def pair(call_id, output, name="exec_command", arguments=None):
@@ -423,19 +485,12 @@ class ExportEvidenceTests(unittest.TestCase):
 
     def test_one_solver_session_cannot_supply_five_independent_training_roles(self):
         binding = self.capture_requests[0]["binding"]
-        combined = [{"type": "session_meta", "payload": binding}]
-        for i, request in enumerate(self.capture_requests):
-            rows = [json.loads(r) for r in Path(request["traces"][0]).read_text().splitlines()]
-            for row in rows:
-                if row["type"] == "session_meta":
-                    continue
-                if "tool_call_id" in row.get("payload", {}):
-                    row["payload"]["tool_call_id"] = f"task-{i}-" + row["payload"]["tool_call_id"]
-                combined.append(row)
-        trace = self.traces / "synthetic-reused-solver.jsonl"
-        self.write_trace(trace, combined)
         contexts = []
         for i, request in enumerate(self.capture_requests):
+            rows = [json.loads(r) for r in Path(request["traces"][0]).read_text().splitlines()]
+            rows[0]["payload"] = binding
+            trace = self.traces / f"synthetic-reused-solver-{i}.jsonl"
+            self.write_trace(trace, rows)
             output = self.private / f"reused-solver-context-{i}.json"
             self.evo.capture({**request, "binding": binding, "traces": [str(trace)], "output": str(output)})
             contexts.append(json.loads(output.read_text()))
@@ -447,7 +502,7 @@ class ExportEvidenceTests(unittest.TestCase):
         role = roles[-1]
         role["binding"]["model_id"] = "synthetic-different-model"
         self.write_trace(Path(role["traces"][0]), self.trace_rows(role["binding"], role["materials"], role["outputs"]))
-        with self.assertRaisesRegex(ValueError, "runtime mismatch"):
+        with self.assertRaisesRegex(ValueError, "runtime"):
             self.evo.seal_training({**self.seal_request, "roles": roles})
 
     def test_role_material_mapping_cannot_replace_validated_task_context(self):
@@ -473,6 +528,112 @@ class ExportEvidenceTests(unittest.TestCase):
         self.save(self.record_path, record)
         with self.assertRaisesRegex(ValueError, "map|binding|context|material|read"):
             self.verify()
+
+    def test_canonical_judge_export_mapping_is_complete_and_hash_bound(self):
+        original = self.evo.seal_training(self.seal_request)
+        task = self.train[0]
+        changed = copy.deepcopy(original)
+        context = protocol.read(self.contexts[0])
+        del changed["members"][task]["judge_evidence_files"][context["judge_request"]["path"]]
+        self.save(self.record_path, changed)
+        with self.assertRaisesRegex(ValueError, "judge evidence mapping"):
+            self.verify()
+        self.save(self.record_path, original)
+        request = Path(context["judge_request"]["path"])
+        self.save(request, {**protocol.read(request), "output": str(self.private / "another-feedback.json")})
+        with self.assertRaisesRegex(ValueError, "request evidence changed"):
+            self.verify()
+
+    def test_continuous_roles_cannot_be_independent_cli_roots(self):
+        record = self.evo.seal_training(self.seal_request)
+        role = self.roles[-1]
+        role["binding"]["source"] = "cli"
+        role["binding"].pop("parent_trace")
+        self.write_trace(Path(role["traces"][0]), self.trace_rows(role["binding"], role["materials"], role["outputs"]))
+        with self.assertRaisesRegex(ValueError, "native child roles"):
+            self.evo.seal_training(self.seal_request)
+        record["roles"][-1]["binding"] = role["binding"]
+        self.save(self.record_path, record)
+        with self.assertRaisesRegex(ValueError, "native child roles"):
+            self.verify()
+
+    def test_continuous_solver_cannot_be_an_independent_cli_root(self):
+        record = self.evo.seal_training(self.seal_request)
+        request = copy.deepcopy(self.capture_requests[0])
+        request["binding"]["source"] = "cli"
+        request["binding"].pop("parent_trace")
+        trace = Path(request["traces"][0])
+        rows = [json.loads(line) for line in trace.read_text().splitlines()]
+        rows[0]["payload"] = request["binding"]
+        self.write_trace(trace, rows)
+        output = self.private / "synthetic-cli-solver-context.json"
+        self.evo.capture({**request, "output": str(output)})
+        with self.assertRaisesRegex(ValueError, "native child roles"):
+            self.evo.seal_training({**self.seal_request, "contexts": [str(output)] + self.contexts[1:]})
+        member = record["members"][self.train[0]]
+        member.update(context_file=output.name, container_context_path=str(output), context_sha256=self.sha(output))
+        self.save(self.record_path, record)
+        with self.assertRaisesRegex(ValueError, "native child roles"):
+            self.verify()
+
+    def test_different_native_parent_is_rejected_by_seal_and_host(self):
+        record = self.evo.seal_training(self.seal_request)
+        role = self.roles[-1]
+        parent = self.traces / "synthetic-other-parent.jsonl"
+        self.write_trace(parent, [{"type": "session_meta", "payload": {
+            **self.root_binding, "session_id": "synthetic-other-training-root"}},
+            {"type": "event_msg", "payload": {"type": "subagent", "session_id": role["binding"]["session_id"]}}])
+        role["binding"]["parent_trace"] = str(parent)
+        self.write_trace(Path(role["traces"][0]), self.trace_rows(role["binding"], role["materials"], role["outputs"]))
+        with self.assertRaisesRegex(ValueError, "different training roots"):
+            self.evo.seal_training(self.seal_request)
+        record["roles"][-1]["binding"] = role["binding"]
+        record["trace_paths"].append(str(parent))
+        self.save(self.record_path, record)
+        with self.assertRaisesRegex(ValueError, "different training roots"):
+            self.verify()
+
+    def test_parent_state_runtime_and_record_identity_are_bound(self):
+        record = self.evo.seal_training(self.seal_request)
+        rows = [json.loads(line) for line in self.parent.read_text().splitlines()]
+        for field in ("provider", "model_id", "workspace", "agent_state"):
+            changed = copy.deepcopy(rows)
+            changed[0]["payload"][field] = "SYNTHETIC changed identity"
+            self.write_trace(self.parent, changed)
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "State/runtime differs"):
+                self.verify()
+        self.write_trace(self.parent, rows)
+        record["training_root"]["session_id"] = "synthetic-invented-root"
+        self.save(self.record_path, record)
+        with self.assertRaisesRegex(ValueError, "native training root"):
+            self.verify()
+
+    def test_parent_compaction_segments_share_session_identity_after_relocation(self):
+        role = self.roles[-1]
+        parent_segment = self.traces / "synthetic-parent-segment-2.jsonl"
+        self.write_trace(parent_segment, [{"type": "session_meta", "payload": self.root_binding},
+            {"type": "event_msg", "payload": {"type": "subagent", "session_id": role["binding"]["session_id"]}}])
+        role["binding"]["parent_trace"] = str(parent_segment)
+        self.write_trace(Path(role["traces"][0]), self.trace_rows(role["binding"], role["materials"], role["outputs"]))
+        record = self.evo.seal_training(self.seal_request)
+        self.assertEqual(record["training_root"], self.root_binding)
+        moved = self.root / "exported-with-compaction"
+        shutil.move(str(self.run), moved)
+        self.assertEqual(self.verify(moved), self.package)
+
+    def test_five_successes_zero_candidates_still_require_a_real_evolver_record(self):
+        fixture = ExportEvidenceTests("test_sealed_five_task_export_survives_relocation_using_original_traces")
+        fixture.all_success = True
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        self.assertEqual(fixture.candidates, [])
+        self.assertEqual([role["role"] for role in fixture.roles], ["evolver"])
+        self.assertEqual(protocol.read(fixture.decisions), [])
+        self.assertTrue(all(not protocol.read(path)["negative"] for path in fixture.contexts))
+        fixture.evo.seal_training(fixture.seal_request)
+        self.assertTrue(fixture.verify()["empty"])
+        with self.assertRaisesRegex(ValueError, "one Evolver"):
+            fixture.evo.seal_training({**fixture.seal_request, "roles": []})
 
 
 if __name__ == "__main__":

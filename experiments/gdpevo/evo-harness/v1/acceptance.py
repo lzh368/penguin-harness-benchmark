@@ -1,0 +1,162 @@
+"""Deterministic freeze acceptance; no model calls, task launch or orchestration."""
+import hashlib
+import io
+import json
+from pathlib import Path, PurePosixPath
+import re
+import tarfile
+import tempfile
+
+SLOT = "skills/evo-harness-learned"
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def read(path):
+    return json.loads(Path(path).read_bytes())
+
+
+def config_version(raw):
+    """Accept the native emitter's plain top-level keys, with one integer version.
+
+    This is intentionally not a general YAML parser: alternate key spellings,
+    flow maps, document directives and duplicate top-level keys are refused.
+    Everything except the single version line is compared byte for byte.
+    """
+    text = raw.decode("utf-8")
+    require("\r" not in text and "\x00" not in text, "unsupported native system_config encoding")
+    keys, version, remaining = set(), None, []
+    for line in text.splitlines(keepends=True):
+        if line.strip() and not line.startswith((" ", "#")):
+            match = re.fullmatch(r"([a-zA-Z_][a-zA-Z0-9_]*):[^\n]*(?:\n)?", line)
+            require(match is not None and match[1] not in keys, "unsupported or duplicate native top-level YAML key")
+            key = match[1]
+            keys.add(key)
+            if key == "version":
+                match = re.fullmatch(r"version: ([1-9][0-9]*)\n", line)
+                require(match is not None, "native version must be one plain positive integer line")
+                version = int(match[1])
+                continue
+        remaining.append(line)
+    require(version is not None, "native State version is missing")
+    return version, "".join(remaining).encode("utf-8")
+
+
+def snapshot(path):
+    """Read regular files only; never extract an archive-controlled path."""
+    try:
+        return _snapshot(path)
+    except (tarfile.TarError, EOFError) as exc:
+        raise ValueError("invalid native snapshot archive") from exc
+
+
+def _snapshot(path):
+    path = Path(path)
+    require(path.is_file() and not path.is_symlink(), "snapshot must be a regular native archive")
+    raw = path.read_bytes()
+    files, entries = {}, {}
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+        for member in archive:
+            name = member.name.removesuffix("/") if member.isdir() else member.name
+            parts = name.split("/")
+            require(parts[0] == "agent_state" and all(p not in ("", ".", "..") for p in parts)
+                    and "\\" not in name and "\x00" not in name,
+                    "snapshot path must stay under agent_state without aliases")
+            require(name not in entries, "duplicate snapshot entry")
+            require(member.isdir() or member.type in (tarfile.REGTYPE, tarfile.AREGTYPE),
+                    "snapshot links and non-regular entries are forbidden")
+            require(len(parts) > 1 or member.isdir(), "agent_state root must be a directory")
+            entries[name] = "dir" if member.isdir() else "file"
+            if member.isdir():
+                continue
+            stream = archive.extractfile(member)
+            require(stream is not None, "snapshot file cannot be read")
+            body = stream.read()
+            require(len(body) == member.size, "truncated snapshot file")
+            files["/".join(parts[1:])] = body
+    require(entries.get("agent_state") == "dir", "native snapshot agent_state root is missing")
+    for name in entries:
+        require(all(entries.get(str(parent)) != "file" for parent in PurePosixPath(name).parents),
+                "snapshot file/directory path conflict")
+    require("system_config.yaml" in files and "AGENTS.md" in files, "native snapshot State files are missing")
+    return {"snapshot_sha256": sha(raw), "files": files}
+
+
+def package_from_snapshot(data, evo):
+    selected = {name.removeprefix(SLOT + "/"): raw for name, raw in data.items() if name.startswith(SLOT + "/")}
+    require(selected, "snapshot learned slot is missing")
+    with tempfile.TemporaryDirectory(prefix="evo-freeze-verify-") as temp:
+        root = Path(temp)
+        for name, raw in selected.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        return evo.validate_package(root)
+
+
+def verify_freeze(req, verify_export, evo):
+    # Always rerun full provenance validation, even for an empty learned package.
+    # Missing/incomplete seals are errors, never a reason to fall back to H0.
+    export_raw = Path(req["export_request"]).read_bytes()
+    export_req = json.loads(export_raw)
+    exported = verify_export(export_req)
+    require(isinstance(exported, dict) and exported.get("complete") is not False,
+            "training export verification is incomplete")
+    training_raw = Path(export_req["training_export"]).read_bytes()
+    require(json.loads(training_raw).get("complete") is True, "training export incomplete")
+    require(req["runtime"] == export_req["runtime"], "freeze runtime differs from training export")
+    runtime = req["runtime"]
+    require(isinstance(runtime, dict) and all(isinstance(runtime.get(k), str) and runtime[k].strip()
+            for k in ("provider", "model_id", "thinking_level")), "invalid frozen runtime")
+    roster = req["test_case_ids"]
+    require(isinstance(roster, list) and len(roster) == 5 and all(isinstance(c, str) for c in roster)
+            and len(roster) == len(set(roster)), "freeze requires five distinct test cases")
+    for case in roster:
+        evo.ident(case)
+    versions = [req["h0_version"], req["final_version"]]
+    require(all(type(v) is int and v > 0 for v in versions), "invalid frozen versions")
+    active = req.get("active_state", "final")
+    require(active in ("h0", "final"), "invalid active State")
+    h0, final = snapshot(req["h0_snapshot"]), snapshot(req["final_snapshot"])
+    h0_version, h0_config = config_version(h0["files"]["system_config.yaml"])
+    final_version, final_config = config_version(final["files"]["system_config.yaml"])
+    require([h0_version, final_version] == versions, "snapshot version differs from frozen version")
+    h0_package = package_from_snapshot(h0["files"], evo)
+    final_package = package_from_snapshot(final["files"], evo)
+    require(h0_package["empty"] is True, "H0 must start with the valid empty learned reader")
+    require(final_package == exported, "final snapshot learned slot differs from verified export")
+    h0_index = json.loads(h0["files"][SLOT + "/index.json"])
+    final_index = json.loads(final["files"][SLOT + "/index.json"])
+    require(all(h0_index[key] == final_index[key] for key in ("max_entries", "max_bytes")),
+            "selection budgets must remain frozen between H0 and final")
+    def outside_slot(files):
+        return {name: raw for name, raw in files.items()
+                if name != "system_config.yaml" and not name.startswith(SLOT + "/")}
+    require(h0_config == final_config and outside_slot(h0["files"]) == outside_slot(final["files"]),
+            "State changed outside learned slot and top-level version")
+    equivalent = h0_package == final_package
+    if equivalent:
+        require(h0_version == final_version and h0["files"] == final["files"],
+                "equivalent H0 requires identical State content and versions")
+    else:
+        require(final_version > h0_version, "changed learned slot requires a higher final version")
+    for state, version in ((h0, h0_version), (final, final_version)):
+        state["filemap"] = {name: sha(raw) for name, raw in sorted(state.pop("files").items())}
+        state["filemap_sha256"] = sha(evo.encoded(state["filemap"]))
+        state["version"] = version
+    target_files = evo.filemap(req["target_state"])
+    require(target_files == (h0 if active == "h0" else final)["filemap"],
+            "live Target State differs from active frozen snapshot")
+    return {"schema": "evo-freeze-verification-v1", "complete": True, "equivalent_h0": equivalent,
+            "active_state": active, "runtime": runtime, "test_case_ids": roster,
+            "export_request_sha256": sha(export_raw), "training_export_sha256": sha(training_raw),
+            "skill_sha256": exported["sha256"], "h0": h0, "final": final,
+            "target_state_filemap_sha256": sha(evo.encoded(target_files)),
+            "verification_input_sha256": sha(evo.encoded(req)), "model_calls": 0}

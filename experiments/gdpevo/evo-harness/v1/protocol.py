@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import tarfile
 import tempfile
@@ -80,6 +81,10 @@ def prepare_trainer(req):
     checked = validate_config(config, req["repo"])
     evo = helper(req["evo_tool"])
     evo.finite(req["training_budget_usd"], low=0.01)
+    if config.get("paid_authorized"):
+        require(req["training_budget_usd"] <= config["budget_usd"], "training allocation exceeds authorized experiment budget")
+        allocated = config.get("budget_allocations_usd", {}).get("continuous_training_including_all_children")
+        require(allocated is None or req["training_budget_usd"] == allocated, "training allocation differs from frozen budget")
     evo.ident(req["host_operation_id"])
     require(req["config_sha256"] == sha(req["config"]), "frozen config hash mismatch")
     base = Path(req["base_state"])
@@ -93,19 +98,46 @@ def prepare_trainer(req):
             "supply sanitized H0 State without memory, schedules or vault")
     require(all(not p.startswith("skills/") or p.startswith("skills/evo-harness-learned/") for p in files),
             "Trainer H0 may carry only the learned slot")
+    require(not any(p.startswith("hooks/") for p in files), "H0 must not carry controller hooks")
     evo.validate_package(base / "skills/evo-harness-learned")
     skill = Path(req["method_skill"])
     require(skill.is_dir() and not skill.is_symlink(), "method Skill missing")
     evo.filemap(skill)
+    hooks = Path(req.get("method_hooks", skill.parents[1] / "hooks/evo-harness-rsi-toolkit"))
+    hook_files = evo.filemap(hooks)
+    require(set(hook_files) == {"hooks.json", "guard.mjs", "icon.svg"}, "supply the native installed Evo hook package")
+    manifest = read(hooks / "hooks.json")
+    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.2",
+            "wrong native method hook package")
+    for point in ("user_prompt", "pre_tool_use", "stop"):
+        require(len(manifest[point]) == 1 and manifest[point][0]["command"] == "guard.mjs",
+                "missing native method guard")
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=target.parent) as tmp:
         stage = Path(tmp) / "agent_state"
         shutil.copytree(base, stage)
         installed = stage / "skills/evo-harness-rsi-toolkit"
         shutil.copytree(skill, installed)
-        training = {"train_ids": config["train_ids"], "attempt_id": "attempt-1",
+        shutil.copytree(hooks, stage / "hooks/evo-harness-rsi-toolkit")
+        # Only the training coordinator uses method hooks. Solver/test children
+        # retain native child semantics; H0 and final Target remain unchanged.
+        yaml = (stage / "system_config.yaml").read_text()
+        blocks = list(re.finditer(r"(?m)^hooks:[^\n]*\n(?:[ \t].*\n|\n)*", yaml))
+        if blocks:
+            require(len(blocks) == 1, "duplicate hooks configuration")
+            block = blocks[0]
+            require(re.fullmatch(r"hooks:\n  enabled: (?:true|false)\n", block[0]),
+                    "unsupported native hooks configuration; use hooks.enabled only")
+            yaml = yaml[:block.start()] + "hooks:\n  enabled: true\n" + yaml[block.end():]
+        else:
+            require(not re.search(r"(?m)^hooks:", yaml), "unsupported native hooks configuration")
+            yaml = yaml.rstrip("\n") + "\nhooks:\n  enabled: true\n"
+        (stage / "system_config.yaml").write_text(yaml)
+        training = {"guard_version": 2, "train_ids": config["train_ids"], "attempt_id": "attempt-1",
                     "limits": {"general": 5, "topic": 5}, "max_entries": 5, "max_bytes": 16000,
                     "runtime": config["runtime"], "workspace": "/app",
+                    "private_learning": "/logs/agent/evo-harness", "answer_dir": "/app/submission/answers",
+                    "feedback_dir": "/logs/agent/evo-harness/feedback",
                     "training_budget_usd": req["training_budget_usd"],
                     "host_operation_id": req["host_operation_id"], "config_sha256": req["config_sha256"],
                     "compilation_reserve_sec": config["compilation_reserve_sec"],
@@ -113,10 +145,13 @@ def prepare_trainer(req):
         require(training["compilation_reserve_sec"] < training["solving_timeout_sec"], "invalid compilation reserve")
         dump(installed / "training.json", training)
         with (stage / "AGENTS.md").open("a") as handle:
-            handle.write("\nFor a continuous group training instruction, if run_subagent is available, read "
-                         "skills/evo-harness-rsi-toolkit/references/group-training.md and complete only its "
-                         "Container training root delegation before returning. A child without run_subagent "
-                         "follows its assigned Solver, Reflector or Evolver role; do not recurse.\n")
+            handle.write("\nEvo-Harness continuous training contract: when run_subagent is available, you are "
+                         "the training coordinator. Read the installed method Skill and references/group-training.md "
+                         "in full; use its native Solver/Reflector/Evolver children in the frozen training.json order. "
+                         "Do not solve tasks or call judge in the coordinator. Each Solver has exactly one judged attempt; "
+                         "zero candidates still requires an Evolver, compilation and a valid training-export.json. "
+                         "A child without run_subagent follows only its full assigned role; do not recurse. "
+                         "The fixed learned reader applies to Solver children, not to coordinator role selection.\n")
         stage.rename(target)
     return {"state": str(target), "files": evo.filemap(target), "training": training}
 
@@ -177,6 +212,13 @@ def verify_export(req):
         require(hashlib.sha256(evo.encoded(context["feedback"])).hexdigest() == member["feedback_sha256"], "feedback mismatch")
         contexts.append(context)
         bind_path(member["container_context_path"], context_path)
+        if context["feedback"].get("source") == "evo-judge":
+            evidence = member["judge_evidence_files"]
+            require(set(evidence) == {context["feedback"]["training_path"], context["judge_request"]["path"],
+                                      context["feedback"]["feedback_path"]},
+                    "canonical judge evidence mapping differs")
+            for original, relative in evidence.items():
+                bind_path(original, private_file(relative))
     evo.validate_contexts(contexts, req["train_ids"], path_map)
     candidate_path = private_file(record["candidates_file"])
     decisions_path = private_file(record["decisions_file"])
@@ -188,6 +230,9 @@ def verify_export(req):
             "learning output changed")
     evo.validate_candidates(read(candidate_path), {(c["task_id"], c["attempt_id"]): c for c in contexts})
     audits = record["roles"]
+    training_root = evo.verify_training_root(contexts, audits, path_map)
+    require(training_root is not None and record["training_root"] == training_root,
+            "continuous export must bind its native training root")
     require(sum(a["role"] == "evolver" for a in audits) == 1, "requires one Evolver")
     require({a["task_id"] for a in audits if a["role"] == "reflector"} ==
             {c["task_id"] for c in contexts if c["negative"]}, "Reflector coverage mismatch")
@@ -287,7 +332,8 @@ def matrix(req):
 def execute(req):
     operations = {"preflight": lambda r: validate_config(read(r["config"]), r["repo"]),
                   "prepare-trainer": prepare_trainer, "pack-state": pack_state,
-                  "verify-export": verify_export, "matrix": matrix}
+                  "verify-export": verify_export, "matrix": matrix,
+                  "verify-freeze": lambda r: helper(Path(__file__).with_name("acceptance.py")).verify_freeze(r, verify_export, helper(r["evo_tool"]))}
     return operations[req["op"]](req)
 
 

@@ -46,9 +46,13 @@ const core = await import(pathToFileURL(path.join(app, 'node_modules/@prismshado
 const plugin = core.loadLibraryPlugins().find(p => p.name === 'evo-harness-rsi-toolkit');
 if (!plugin || plugin.category !== 'rsi' || plugin.skills.length !== 1 ||
     plugin.skills[0].name !== 'evo-harness-rsi-toolkit' ||
-    !plugin.skills[0].files?.['scripts/evo.py']) throw new Error('Evo-Harness native plugin load failed');
+    !plugin.skills[0].files?.['scripts/evo.py'] || !plugin.skills[0].files?.['scripts/control.py'] ||
+    !plugin.hooks?.files?.['guard.mjs'] || plugin.hooks.manifest.version !== plugin.skills[0].version ||
+    ['user_prompt','pre_tool_use','stop'].some(point => !plugin.hooks.manifest[point]?.length))
+  throw new Error('Evo-Harness native plugin and guard load failed');
 console.log(JSON.stringify({build: core.buildInfo(), plugin: {
   name: plugin.name, version: plugin.version, category: plugin.category,
+  hook_version: plugin.hooks.manifest.version, hook_files: Object.keys(plugin.hooks.files).sort(),
   skills: plugin.skills.map(s => ({name: s.name, version: s.version, support_files: Object.keys(s.files ?? {}).sort()}))
 }}));
 JS

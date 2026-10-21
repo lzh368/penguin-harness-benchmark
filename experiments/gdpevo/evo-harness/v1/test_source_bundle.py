@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import source_bundle as bundle
 
 
@@ -12,7 +13,90 @@ class SourceBundleTests(unittest.TestCase):
         expected = {"package.json", "LICENSE", "icon.svg", "skills/evo-harness-rsi-toolkit/SKILL.md",
                     "skills/evo-harness-rsi-toolkit/scripts/evo.py"}
         tracked = [prefix + p for p in expected | {"tests/test_evo.py"}]
-        self.assertEqual(bundle.published_plugin_files(tracked), expected)
+        package = {"files": ["icon.svg", "skills", "LICENSE"]}
+        self.assertEqual(bundle.published_plugin_files(tracked, package), expected)
+
+    def test_hooks_follow_explicit_files_declaration_without_other_paths(self):
+        prefix = "plugins/evo-harness-rsi-toolkit/"
+        tracked = [prefix + name for name in ("package.json", "LICENSE", "hooks/guard.mjs",
+                   "hooks/lib.mjs", "tests/test_evo.py", "private/secret", "hooks-not-published.mjs")]
+        self.assertEqual(bundle.published_plugin_files(tracked, {"files": ["hooks"]}),
+                         {"package.json", "LICENSE", "hooks/guard.mjs", "hooks/lib.mjs"})
+        self.assertEqual(bundle.published_plugin_files(tracked, {"files": ["LICENSE"]}),
+                         {"package.json", "LICENSE"})
+        for entries in (None, "hooks", ["*"], ["../hooks"], ["/hooks"], ["hooks/../private"],
+                        ["private"], ["hooks/**"], ["hooks", "hooks"], [None]):
+            with self.subTest(files=entries), self.assertRaisesRegex(ValueError, "unsupported.*files"):
+                bundle.published_plugin_files(tracked, {"files": entries})
+
+    def make_record_fixture(self, temp):
+        source, root = Path(temp) / "source", Path(temp) / "bundle"
+        app = root / bundle.APP
+        commit, version, node = "a" * 40, "0.0.0-synthetic", "v22.0.0"
+        for name in ("cli", "core", "server"):
+            source_dist = source / "packages" / name / "dist"
+            source_dist.mkdir(parents=True)
+            filename = "penguin.js" if name == "cli" else "index.js"
+            (source_dist / filename).write_text("// SYNTHETIC " + name + "\n")
+            target = app if name == "cli" else app / "node_modules/@prismshadow" / ("penguin-" + name)
+            (target / "dist").mkdir(parents=True)
+            (target / "dist" / filename).write_bytes((source_dist / filename).read_bytes())
+        (app / "package.json").write_text(json.dumps({"version": version}))
+        (source / "pnpm-lock.yaml").write_text("# SYNTHETIC\n")
+        package = {"name": bundle.PLUGIN, "files": ["skills", "hooks", "LICENSE", "icon.svg"]}
+        source_files = {"package.json": json.dumps(package), "LICENSE": "SYNTHETIC",
+                        "icon.svg": "<svg/>", "skills/evo/SKILL.md": "SYNTHETIC",
+                        "hooks/guard.mjs": "// SYNTHETIC guard\n", "hooks/lib.mjs": "// SYNTHETIC dependency\n"}
+        plugin = app / "node_modules" / bundle.PLUGIN
+        prefix = "plugins/evo-harness-rsi-toolkit/"
+        for name, content in source_files.items():
+            for path in (source / prefix / name, plugin / name):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+        build = {"channel": "source", "commit": commit, "dirty": False, "version": version,
+                 "runtime": {"node": node, "platform": "linux"}}
+        (root / "cli-build.json").write_text(json.dumps(build))
+        (root / "native-plugin-probe.json").write_text(json.dumps({"build": build, "plugin": {"synthetic": True}}))
+        def git_fixture(_source, *args):
+            if args[0] == "ls-tree":
+                return "\n".join(prefix + name for name in source_files)
+            if args == ("rev-parse", commit + "^{tree}"):
+                return "b" * 40
+            raise AssertionError("unexpected synthetic git command: " + repr(args))
+        return source, root, plugin, commit, node, git_fixture
+
+    def test_record_rejects_missing_or_modified_hook_source(self):
+        for mutation in ("missing", "modified"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(prefix="synthetic-bundle-") as temp:
+                source, root, plugin, commit, node, git_fixture = self.make_record_fixture(temp)
+                hook = plugin / "hooks/guard.mjs"
+                if mutation == "missing":
+                    hook.unlink()
+                else:
+                    hook.write_text("// SYNTHETIC different hook\n")
+                expected = "missing/unexpected" if mutation == "missing" else "content differs"
+                with patch.object(bundle, "check_source"), patch.object(bundle, "git", side_effect=git_fixture), \
+                        self.assertRaisesRegex(ValueError, expected):
+                    bundle.record(source, commit, root, node)
+                self.assertFalse((root / "bundle.json").exists())
+
+    def test_record_seals_all_hooks_and_verify_rejects_deleted_or_changed_hook(self):
+        for mutation in ("missing", "modified"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(prefix="synthetic-bundle-") as temp:
+                source, root, plugin, commit, node, git_fixture = self.make_record_fixture(temp)
+                with patch.object(bundle, "check_source"), patch.object(bundle, "git", side_effect=git_fixture):
+                    bundle.record(source, commit, root, node)
+                self.assertTrue(bundle.verify(root, commit)["verified"])
+                sealed = json.loads((root / "bundle.json").read_text())["plugin_files"]["files"]
+                for filename in ("hooks/guard.mjs", "hooks/lib.mjs"):
+                    self.assertEqual(sealed[filename]["sha256"], bundle.sha(plugin / filename))
+                hook = plugin / "hooks/lib.mjs"
+                if mutation == "missing":
+                    hook.unlink()
+                else:
+                    hook.write_text("// SYNTHETIC changed after sealing\n")
+                with self.assertRaisesRegex(ValueError, "payload changed"):
+                    bundle.verify(root, commit)
 
     def test_requires_clean_build_from_exact_commit(self):
         commit = "a" * 40

@@ -65,10 +65,18 @@ def checked_build(build, commit):
             and build.get("dirty") is False, "stale, dirty or non-source compiled artifact; rebuild the clean commit")
 
 
-def published_plugin_files(tracked):
+def published_plugin_files(tracked, package):
+    # Mirror this plugin's explicit npm publish surface, not arbitrary globs or
+    # paths from a manifest. package.json and LICENSE are npm's implicit files.
+    published = package.get("files")
+    allowed = {"icon.svg", "skills", "LICENSE", "hooks"}
+    require(isinstance(published, list) and all(isinstance(p, str) and p in allowed for p in published)
+            and len(published) == len(set(published)), "unsupported Evo-Harness package files declaration")
     prefix = "plugins/evo-harness-rsi-toolkit/"
     names = {p.removeprefix(prefix) for p in tracked if p.startswith(prefix)}
-    return {p for p in names if p in ("package.json", "LICENSE", "icon.svg") or p.startswith("skills/")}
+    directories = set(published) & {"skills", "hooks"}
+    files = {"package.json", "LICENSE"} | (set(published) & {"icon.svg"})
+    return {p for p in names if p in files or any(p.startswith(d + "/") for d in directories)}
 
 
 def record(source, commit, root, node_version):
@@ -94,7 +102,7 @@ def record(source, commit, root, node_version):
     source_plugin = source / "plugins/evo-harness-rsi-toolkit"
     tracked = set(git(source, "ls-tree", "-r", "--name-only", commit, "--",
                       "plugins/evo-harness-rsi-toolkit").splitlines())
-    expected = published_plugin_files(tracked)
+    expected = published_plugin_files(tracked, read(source_plugin / "package.json"))
     require(set(plugin_files["files"]) == expected and not plugin_files["symlinks"],
             "deployed plugin has missing/unexpected published files")
     require(all(sha(source_plugin / p) == item["sha256"] for p, item in plugin_files["files"].items()),

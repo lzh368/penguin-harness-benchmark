@@ -14,11 +14,13 @@
 # Outputs in $PB_LOGS: penguin-run.json (the CLI's --json output), penguin-run.stderr,
 # penguin-cost-by-session.json, penguin-cost-by-model.json, penguin-outcome.json,
 # penguin/{server.log,server-ready.json,max-turns.json,server-stop.json,abort.json,redaction.json,
-# traces/<agent>/,logs/}.
+# quiescence.json,traces/<agent>/,logs/}.
 #
 # Exit status: that of `penguin run` (0 = completed or soft timeout), after the cleanup
 # below has run in every case; 3 when the server never came up, 4 when the requested
-# turn cap could not be set.
+# turn cap could not be set, 5 for work left running after root completion, 6 when
+# native trial work could not be confirmed idle or costs remain unsettled, 7 when
+# graceful process cleanup could not be confirmed.
 set -u
 
 WORKSPACE="$PWD"
@@ -60,6 +62,9 @@ RUN_RC=3
 STATUS="server_failed"
 SESSION_ID="-"
 TIMED_OUT=false
+QUIESCENT=false
+COST_STATUS="unavailable"
+PROCESS_CLEANUP="pending"
 CONFIG_READY="$SERVER_READY"
 # Optional turn cap: the stock Agent's max_turns, set through the Agent config API. A
 # requested cap that cannot be applied skips the run instead of running uncapped.
@@ -94,31 +99,69 @@ if [ "$CONFIG_READY" = true ]; then
   read -r STATUS SESSION_ID <<EOF
 $("$NODE" "$HELPER" run-status "$OUT/penguin-run.json")
 EOF
-  # 3. A soft timeout leaves the Task running on the server: abort it and wait for the
-  #    session to go idle, so the cost read below covers everything that was spent.
+  # 3. A soft timeout leaves the Task running. Root completion can also leave native
+  #    background children running: ordinary child Session rows do not expose this.
+  #    One bounded cleanup checks parent background counts and uses native stop APIs.
+  #    Never submit another Task, and never read a partial cost as final completion.
   if [ "$STATUS" = "running" ] && [ "$SESSION_ID" != "-" ]; then
     TIMED_OUT=true
-    "$NODE" "$HELPER" abort "$PENGUIN_HOME" "$SESSION_ID" "$PB_ABORT_WAIT" >"$OUT/penguin/abort.json" 2>&1
+  fi
+  "$NODE" "$HELPER" quiesce "$PENGUIN_HOME" "$PB_PROJECT" "$SESSION_ID" "$PB_ABORT_WAIT" \
+    >"$OUT/penguin/quiescence.json" 2>&1
+  QUIESCE_RC=$?
+  if [ "$QUIESCE_RC" -eq 0 ] || [ "$QUIESCE_RC" -eq 5 ]; then
+    QUIESCENT=true
+    if [ "$QUIESCE_RC" -eq 5 ] && [ "$TIMED_OUT" = false ]; then
+      STATUS="method_failed_active_work"
+      RUN_RC=5
+    fi
+  else
+    STATUS="method_failed_unsettled"
+    RUN_RC=6
+    COST_STATUS="unsettled"
   fi
 fi
 FINISHED_MS="$(now_ms)"
 
 # 4. Usage and cost as the product prices them (every session in this root is this trial's,
 #    subagents included).
-if [ "$SERVER_READY" = true ]; then
+if [ "$SERVER_READY" = true ] && [ "$QUIESCENT" = true ]; then
   "$PENGUIN" cost --by session --days 7 --project-id "$PB_PROJECT" --json \
     >"$OUT/penguin-cost-by-session.json" 2>>"$OUT/penguin-run.stderr"
+  SESSION_COST_RC=$?
   "$PENGUIN" cost --by model --days 7 --project-id "$PB_PROJECT" --json \
     >"$OUT/penguin-cost-by-model.json" 2>>"$OUT/penguin-run.stderr"
+  MODEL_COST_RC=$?
+  if "$NODE" "$HELPER" verify-cost "$OUT/penguin-cost-by-session.json" "$OUT/penguin-cost-by-model.json" \
+    >"$OUT/penguin/cost-validity.json" 2>&1 && [ "$SESSION_COST_RC" -eq 0 ] && [ "$MODEL_COST_RC" -eq 0 ]; then
+    COST_STATUS="observed_after_native_idle"
+  else
+    COST_STATUS="unsettled"
+    STATUS="method_failed_unsettled"
+    RUN_RC=6
+  fi
 fi
 
-# 5. Stop the server (and anything it still runs) before the verifier phase.
+# 5. Native idle is a model-run boundary, not proof that a completed leaf left no
+#    background OS process. Graceful server shutdown disposes that whole runtime
+#    tree before Harbor's verifier. A forced stop is not a successful cleanup receipt.
 "$PENGUIN" server stop --root "$PENGUIN_HOME" >"$OUT/penguin/server-stop.json" 2>&1
+SERVER_STOP_RC=$?
 for _ in $(seq 1 30); do
   kill -0 "$SERVER_PID" 2>/dev/null || break
   sleep 1
 done
-kill -9 "$SERVER_PID" 2>/dev/null
+if [ "$SERVER_STOP_RC" -eq 0 ] && ! kill -0 "$SERVER_PID" 2>/dev/null && \
+  "$NODE" "$HELPER" verify-stop "$OUT/penguin/server-stop.json" >"$OUT/penguin/server-stop-validity.json" 2>&1; then
+  PROCESS_CLEANUP="server_shutdown"
+else
+  PROCESS_CLEANUP="unconfirmed"
+  COST_STATUS="unsettled"
+  STATUS="method_failed_cleanup"
+  RUN_RC=7
+  kill -9 "$SERVER_PID" 2>/dev/null
+fi
+wait "$SERVER_PID" 2>/dev/null
 
 # 6. Keep the Traces and server logs, never the config: the data root stays outside /logs.
 PROJECT_DIR="$PENGUIN_HOME/$PB_PROJECT"
@@ -136,8 +179,8 @@ fi
 "$NODE" "$HELPER" redact "$PROJECT_DIR/.project_config.toml" "$OUT" >"$OUT/penguin/redaction.json" 2>&1
 
 "$NODE" "$HELPER" outcome "$OUT/penguin-outcome.json" "$(printf \
-  '{"exit_code":%d,"status":"%s","session_id":"%s","timed_out":%s,"server_ready":%s,"started_at_ms":%s,"finished_at_ms":%s}' \
-  "$RUN_RC" "$STATUS" "$SESSION_ID" "$TIMED_OUT" "$SERVER_READY" "$STARTED_MS" "$FINISHED_MS")"
+  '{"exit_code":%d,"status":"%s","session_id":"%s","timed_out":%s,"server_ready":%s,"native_sessions_idle":%s,"cost_status":"%s","process_cleanup":"%s","started_at_ms":%s,"finished_at_ms":%s}' \
+  "$RUN_RC" "$STATUS" "$SESSION_ID" "$TIMED_OUT" "$SERVER_READY" "$QUIESCENT" "$COST_STATUS" "$PROCESS_CLEANUP" "$STARTED_MS" "$FINISHED_MS")"
 
 if [ "$RUN_RC" -ne 0 ]; then
   echo "penguin run exited with status $RUN_RC ($STATUS); last lines of its stderr:" >&2
