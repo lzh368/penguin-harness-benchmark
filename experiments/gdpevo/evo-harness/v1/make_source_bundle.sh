@@ -57,9 +57,14 @@ console.log(JSON.stringify({build: core.buildInfo(), plugin: {
 }}));
 JS
 python3 -B "$HERE/source_bundle.py" record "$SOURCE" "$COMMIT" "$ROOT" "$NODE_VERSION"
-python3 -B "$HERE/source_bundle.py" verify "$ROOT" "$COMMIT"
+python3 -B "$HERE/source_bundle.py" verify-staged "$ROOT" "$COMMIT"
 python3 -B "$HERE/source_bundle.py" check-source "$SOURCE" "$COMMIT"
-tar -czf "$PARTIAL" -C "$STAGE" penguin-bench
+# Normalize archive metadata only. pnpm may hardlink deployed files to the
+# shared store/source build: chmod on staging would mutate those outside files.
+# X preserves executable files and makes directories traversable; clear special
+# bits explicitly (GNU tar otherwise preserves a directory's setgid bit).
+tar --mode=u=rwX,go=rX,a-s,a-t -czf "$PARTIAL" -C "$STAGE" penguin-bench
+python3 -B "$HERE/source_bundle.py" verify-archive "$PARTIAL" "$COMMIT"
 # Publish only after all checks succeed. The exclusive lock protects this output.
 mv "$PARTIAL" "$OUTPUT"
 sha256sum "$OUTPUT" > "$OUTPUT.sha256"

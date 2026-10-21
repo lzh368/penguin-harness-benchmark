@@ -1,6 +1,11 @@
 """Synthetic provenance guard tests; no model calls or real experiment claims."""
+import gzip
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -8,6 +13,13 @@ import source_bundle as bundle
 
 
 class SourceBundleTests(unittest.TestCase):
+    def archive_using_builder_command(self, stage, archive):
+        commands = [line for line in Path(bundle.__file__).with_name("make_source_bundle.sh").read_text().splitlines()
+                    if line.startswith("tar --mode=")]
+        self.assertEqual(len(commands), 1)
+        subprocess.run(["bash", "-c", commands[0]], check=True,
+                       env={**os.environ, "STAGE": str(stage), "PARTIAL": str(archive)})
+
     def test_published_plugin_includes_icon_and_excludes_tests(self):
         prefix = "plugins/evo-harness-rsi-toolkit/"
         expected = {"package.json", "LICENSE", "icon.svg", "skills/evo-harness-rsi-toolkit/SKILL.md",
@@ -135,6 +147,112 @@ class SourceBundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "external or broken"):
                     bundle.inventory(root)
                 link.unlink()
+
+    def test_restrictive_umask_tar_has_exact_public_modes_without_chmod_hardlinks(self):
+        with tempfile.TemporaryDirectory(prefix="synthetic-public-bundle-") as temp:
+            temp = Path(temp)
+            old_umask = os.umask(0o077)
+            try:
+                source, root, plugin, commit, node, git_fixture = self.make_record_fixture(temp)
+                # Match the builder's real archive root while retaining source
+                # and the synthetic shared store outside it.
+                stage = temp / "stage"
+                stage.mkdir()
+                root.rename(stage / "penguin-bench")
+                root = stage / "penguin-bench"
+                deployed = root / bundle.APP / "dist/penguin.js"
+                original = source / "packages/cli/dist/penguin.js"
+                deployed.unlink()
+                os.link(original, deployed)
+                store = temp / "shared-store-executable"
+                store.write_text("#!/bin/sh\nprintf 'public-mode-probe\\n'\n")
+                store.chmod(0o700)
+                (root / "bin").mkdir()
+                os.link(store, root / "bin/probe")
+                (root / "bin/relative-link").symlink_to("probe")
+                (root / "bin").chmod(0o2770)
+                before = {str(p): (p.stat().st_ino, p.stat().st_mode, bundle.sha(p)) for p in (original, store)}
+                with patch.object(bundle, "check_source"), patch.object(bundle, "git", side_effect=git_fixture):
+                    bundle.record(source, commit, root, node)
+                self.assertTrue(bundle.verify_staged(root, commit)["verified"])
+                with self.assertRaisesRegex(ValueError, "permissions differ|payload changed"):
+                    bundle.verify(root, commit)
+                archive = temp / "public.tar.gz"
+                self.archive_using_builder_command(stage, archive)
+                rewinds = []
+                original_seek = gzip.GzipFile.seek
+                def observe_seek(handle, offset, whence=0):
+                    if whence == 0 and offset < handle.tell():rewinds.append(offset)
+                    return original_seek(handle, offset, whence)
+                with patch.object(gzip.GzipFile, "seek", observe_seek):
+                    self.assertTrue(bundle.verify_archive(archive, commit)["verified_archive"])
+                self.assertEqual(rewinds, [], "archive verification must not repeatedly decompress its payload")
+                self.assertEqual(before, {str(p): (p.stat().st_ino, p.stat().st_mode, bundle.sha(p)) for p in (original, store)})
+                self.assertEqual(deployed.stat().st_ino, original.stat().st_ino)
+                with tarfile.open(archive) as packed:
+                    for member in packed.getmembers():
+                        if member.isdir():self.assertEqual(member.mode, 0o755)
+                        elif member.isfile() or member.islnk():self.assertIn(member.mode, (0o644, 0o755))
+                    self.assertEqual(packed.getmember("penguin-bench/bin/probe").mode, 0o755)
+                    self.assertEqual(packed.getmember("penguin-bench/bundle.json").mode, 0o644)
+                extracted = temp / "extracted"
+                extracted.mkdir()
+                subprocess.run(["tar", "-xzf", str(archive), "--same-permissions", "--no-same-owner", "-C", str(extracted)], check=True)
+                published = extracted / "penguin-bench"
+                self.assertTrue(bundle.verify(published, commit)["verified"])
+                # Real non-root process reads every public file and executes
+                # the public binary. In root CI only this synthetic tree is
+                # traversable to nobody; normal runs already use a non-root UID.
+                temp.chmod(0o755);extracted.chmod(0o755)
+                identity = {"user": 65534, "group": 65534, "extra_groups": []} if os.geteuid() == 0 else {}
+                probe = "import os,pathlib,subprocess; assert os.geteuid()!=0; r=pathlib.Path.cwd(); [p.read_bytes() for p in r.rglob('*') if p.is_file()]; assert subprocess.check_output([str(r/'bin/probe')])==b'public-mode-probe\\n'; print('non-root-public-access-ok')"
+                result = subprocess.run([sys.executable, "-c", probe], cwd=published, check=True,
+                                        capture_output=True, text=True, **identity)
+                self.assertEqual(result.stdout.strip(), "non-root-public-access-ok")
+                published.chmod(0o700)
+                with self.assertRaisesRegex(ValueError, "payload changed"):
+                    bundle.verify(published, commit)
+            finally:
+                os.umask(old_umask)
+
+    def test_public_inventory_refuses_private_files_and_unrelocatable_links(self):
+        for filename in (".env", ".env.production", ".vault.toml", ".project_config.toml", "api-token", ".npmrc"):
+            with self.subTest(private=filename), tempfile.TemporaryDirectory(prefix="synthetic-private-bundle-") as temp:
+                source, root, plugin, commit, node, git_fixture = self.make_record_fixture(temp)
+                (root / bundle.APP / filename).write_text("SYNTHETIC private, never archive")
+                with patch.object(bundle, "check_source"), patch.object(bundle, "git", side_effect=git_fixture), \
+                        self.assertRaisesRegex(ValueError, "private file"):
+                    bundle.record(source, commit, root, node)
+                self.assertFalse((root / "bundle.json").exists())
+        with tempfile.TemporaryDirectory(prefix="synthetic-bundle-links-") as temp:
+            root = Path(temp) / "bundle"
+            (root / "bin").mkdir(parents=True)
+            outside = Path(temp) / "private"
+            outside.write_text("SYNTHETIC external")
+            outside.chmod(0o600)
+            original = (outside.stat().st_mode, bundle.sha(outside))
+            target = root / "bin/target"
+            target.write_text("SYNTHETIC public")
+            for link_target, reason in ((outside, "external or broken"), (target, "absolute symlink")):
+                link = root / "bin/link"
+                link.symlink_to(link_target)
+                with self.assertRaisesRegex(ValueError, reason):
+                    bundle.inventory(root, normalize_modes=True, include_directories=True, public=True)
+                self.assertEqual(original, (outside.stat().st_mode, bundle.sha(outside)))
+                link.unlink()
+
+    def test_archive_with_unfixed_permissions_is_not_publishable(self):
+        with tempfile.TemporaryDirectory(prefix="synthetic-unfixed-bundle-") as temp:
+            source, root, plugin, commit, node, git_fixture = self.make_record_fixture(temp)
+            stage = Path(temp)/"stage"
+            stage.mkdir();root.rename(stage/"penguin-bench");root=stage/"penguin-bench"
+            root.chmod(0o700)
+            with patch.object(bundle, "check_source"), patch.object(bundle, "git", side_effect=git_fixture):
+                bundle.record(source, commit, root, node)
+            archive = Path(temp)/"bad.tar.gz"
+            subprocess.run(["tar", "-czf", str(archive), "-C", str(stage), "penguin-bench"], check=True)
+            with self.assertRaisesRegex(ValueError, "directory permissions differ"):
+                bundle.verify_archive(archive, commit)
 
 
 if __name__ == "__main__":
