@@ -99,7 +99,11 @@ class ControllerAcceptanceTests(unittest.TestCase):
         self.save(Path(self.mode["freeze_request"]), {"evo_tool": str(self.tool), "export_request": str(exported),
             "h0_snapshot": str(self.h0), "final_snapshot": str(self.final), "h0_version": 1, "final_version": self.final_version,
             "target_state": str(self.target), "test_case_ids": self.test_cases, "runtime": self.runtime})
-        self.identity = {"agent_id": "synthetic-target", "expected_version": 1, **self.runtime}
+        # Match the unchanged native evaluation.md output, not the complete
+        # frozen runtime used by export/freeze/injection requests. Real workers
+        # do not return api_host, effective_reasoning_effort or client_type.
+        self.worker_runtime = {key: self.runtime[key] for key in ("provider", "model_id", "thinking_level")}
+        self.identity = {"agent_id": "synthetic-target", "expected_version": 1, **self.worker_runtime}
         self.cells = [{"protocol_version": 1, **self.identity, "case_id": task, "run": 1, "status": "ok",
             "score": 50, "cost": 0, "duration_ms": 1, "session_id": f"harbor:synthetic-test-{i}"}
             for i, task in enumerate(self.test_cases)]
@@ -126,11 +130,30 @@ class ControllerAcceptanceTests(unittest.TestCase):
     def hook(self, event, **extra):
         return self.control.hook({"hook": event, "trace_path": str(self.trace), **extra}, self.state)
 
-    def call(self, task):
+    def call(self, task, version=1):
         prompt = "\n".join(f"{key}: {value}" for key, value in {
             "benchmark_id": self.config["test_benchmark_id"], "test_agent_id": "synthetic-target",
-            "case_id": task, "run": 1, "expected_version": 1, **self.runtime}.items())
-        return {"description": "SYNTHETIC test worker", "prompt": prompt, **self.runtime, "run_in_background": True}
+            "case_id": task, "run": 1, "expected_version": version, **self.worker_runtime}.items())
+        return {"description": "SYNTHETIC test worker", "prompt": prompt, **self.worker_runtime, "run_in_background": True}
+
+    def test_native_worker_fields_cannot_be_replaced_with_full_frozen_runtime(self):
+        self.assertEqual(set(self.identity), {"agent_id", "expected_version", "provider", "model_id", "thinking_level"})
+        self.assertEqual(set(self.cells[0]), {"protocol_version", "status", "case_id", "run", "agent_id",
+            "expected_version", "provider", "model_id", "thinking_level", "score", "cost", "duration_ms", "session_id"})
+        self.assertTrue(protocol.matrix(self.matrix)["complete"])
+        with self.assertRaisesRegex(ValueError, "cell runtime/state mismatch"):
+            protocol.matrix({**self.matrix, "identity": {**self.identity, **self.runtime}})
+        self.assertEqual(set(self.call(self.test_cases[0])),
+                         {"description", "prompt", "provider", "model_id", "thinking_level", "run_in_background"})
+
+    def test_freeze_still_requires_full_runtime_despite_smaller_worker_identity(self):
+        request_path = Path(self.mode["freeze_request"])
+        original = protocol.read(request_path)
+        self.save(request_path, {**original, "runtime": self.worker_runtime})
+        with self.assertRaisesRegex(ValueError, "freeze differs from authorized runtime"):
+            self.control.freeze(self.mode)
+        self.save(request_path, original)
+        self.assertTrue(self.control.freeze(self.mode)["complete"])
 
     def test_five_h0_calls_authorize_only_after_real_noop_freeze_and_final_is_reused(self):
         ledger = str(self.control.journal_path(self.scratch, self.mode))
@@ -202,10 +225,35 @@ class ControllerAcceptanceTests(unittest.TestCase):
             **fixture.matrix, "cells": str(final_cells_path), "identity": {**fixture.identity, "expected_version": 2}})
         fixture.save(Path(fixture.mode["completion_request"]), {"h0_matrix_request": str(fixture.matrix_path),
             "final_matrix_request": str(final_matrix), "host_cost_status": "pending_final_request"})
+        # Restore the actual frozen State before each five-cell registration.
+        # No worker/model is dispatched by these deterministic ticket checks.
+        for phase, archive, version in (("h0", fixture.h0, 1), ("final", fixture.final, 2)):
+            shutil.rmtree(fixture.target)
+            for name, content in acceptance.snapshot(archive)["files"].items():
+                path = fixture.target / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            for case in fixture.test_cases:
+                ticket = fixture.control.worker_request({"phase": phase, "call": fixture.call(case, version)},
+                                                       fixture.scratch, fixture.mode)
+                self.assertFalse(ticket["dispatched"])
+        evaluations = [protocol.matrix(req)["evaluation"]
+                       for req in (fixture.matrix, protocol.read(final_matrix))]
+        self.assertEqual([entry["version"] for entry in evaluations], [1, 2])
+        for entry in evaluations:
+            self.assertEqual(set(entry), {"time", "agent_id", "version", "provider", "model_id", "thinking_level",
+                "summary_title", "summary", "score", "cost", "duration_ms", "cases"})
+            self.assertEqual(len(entry["cases"]), 5)
+            self.assertTrue(all(len(case["runs"]) == 1 for case in entry["cases"]))
+        # JSON is a valid plain YAML document; retain the exact native matrix
+        # records. The native YAML-parser roundtrip has its own offline test.
+        scoreboard = fixture.save(fixture.benchmark / "scoreboard.yaml", {"evaluations": evaluations})
+        self.assertEqual(protocol.read(scoreboard)["evaluations"], evaluations)
         accepted = fixture.control.controller_final(fixture.mode)
         self.assertTrue(accepted["complete"])
         self.assertFalse(accepted["equivalent_h0"])
         self.assertEqual(len(accepted["injection"]), 2)
+        self.assertEqual(sum(len(phase["cells"]) for phase in accepted["injection"]), 10)
         self.assertTrue(all(cell["bytes"] == 0 for cell in accepted["injection"][0]["cells"]))
         self.assertTrue(all(cell["bytes"] > 0 for cell in accepted["injection"][1]["cells"]))
 
