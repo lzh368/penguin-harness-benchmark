@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 import protocol
 import registration
@@ -68,6 +69,79 @@ class RegistrationTests(unittest.TestCase):
 
     def run_prepare(self):
         return protocol.execute(self.req)
+
+    def replace_bundle(self, blob):
+        with tarfile.open(self.bundle, "w:gz") as archive:
+            info = tarfile.TarInfo("penguin-bench/bundle.json")
+            info.size = len(blob)
+            archive.addfile(info, io.BytesIO(blob))
+        digest = registration.sha(self.bundle)
+        self.config["bundle_sha256"] = digest
+        self.config["deployment"]["bundle_sha256"] = digest
+        self.preflight["pins"]["bundle_sha256"] = digest
+        self.save_preflight()
+        self.save_config()
+
+    def test_realistic_dependency_inventory_above_old_limit_registers_with_pins(self):
+        manifest = copy.deepcopy(self.bundle_meta)
+        manifest["payload"] = {"files": {
+            f"npm/lib/node_modules/@prismshadow/penguin-cli/node_modules/fixture-package-{i:05d}/dist/module.js":
+            {"mode": 420, "sha256": f"{i:064x}"} for i in range(23944)}, "symlinks": {}}
+        blob = json.dumps(manifest, sort_keys=True, indent=2).encode()
+        # gpu01's fully verified b984471b source bundle contains a 5,315,870
+        # byte regular manifest. Match its actual scale with dependency records
+        # and a few legal trailing whitespace bytes, without copying its payload.
+        observed_manifest_bytes = 5315870
+        self.assertLessEqual(len(blob), observed_manifest_bytes)
+        blob += b" " * (observed_manifest_bytes - len(blob))
+        self.assertEqual(len(blob), observed_manifest_bytes)
+        self.assertGreater(len(blob), 4 * 1024 * 1024)
+        self.assertLess(len(blob), registration.MAX_BUNDLE_MANIFEST_BYTES)
+        self.replace_bundle(blob)
+        result = self.run_prepare()
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(protocol.execute({**self.req, "op": "verify-benchmarks"}), result)
+        # A larger accepted inventory never relaxes source or runtime identity.
+        self.config["adapter"]["node_version"] = "24.18.0"
+        self.save_config()
+        with self.assertRaisesRegex(ValueError, "runtime pins differ"):
+            self.run_prepare()
+        self.config["adapter"]["node_version"] = "24.20.0"
+        self.config["versions"]["penguin_commit"] = "c" * 40
+        self.save_config()
+        with self.assertRaisesRegex(ValueError, "runtime pins differ"):
+            self.run_prepare()
+        self.config["versions"]["penguin_commit"] = "a" * 40
+        self.save_config()
+        with self.bundle.open("ab") as stream:
+            stream.write(b"changed frozen archive")
+        with self.assertRaisesRegex(ValueError, "artifact changed"):
+            self.run_prepare()
+
+    def test_manifest_actual_64_mib_boundary_and_oversize_rejection(self):
+        limit = registration.MAX_BUNDLE_MANIFEST_BYTES
+        self.assertEqual(limit, 64 * 1024 * 1024)
+        raw = json.dumps(self.bundle_meta).encode()
+        # Legal trailing JSON whitespace exercises the actual bound without
+        # constructing a huge decoded inventory or weakening the production cap.
+        self.replace_bundle(raw + b" " * (limit - len(raw)))
+        self.assertEqual(registration._bundle_manifest(self.bundle), self.bundle_meta)
+        self.replace_bundle(raw + b" " * (limit + 1 - len(raw)))
+        with patch.object(tarfile.TarFile, "extractfile", side_effect=AssertionError("must reject before read")):
+            with self.assertRaisesRegex(ValueError, f"exceeds {limit} bytes"):
+                registration._bundle_manifest(self.bundle)
+
+    def test_manifest_link_or_non_object_rejected(self):
+        with tarfile.open(self.bundle, "w:gz") as archive:
+            info = tarfile.TarInfo("penguin-bench/bundle.json")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "different.json"
+            archive.addfile(info)
+        with self.assertRaisesRegex(ValueError, "invalid source bundle manifest"):
+            registration._bundle_manifest(self.bundle)
+        self.replace_bundle(b"[]")
+        with self.assertRaisesRegex(ValueError, "manifest object"):
+            registration._bundle_manifest(self.bundle)
 
     def test_native_roster_complete_launch_and_full_runtime(self):
         result = self.run_prepare()

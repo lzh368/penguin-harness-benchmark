@@ -8,6 +8,12 @@ import tarfile
 import tempfile
 
 
+# The source bundle records every installed dependency file, so its JSON
+# inventory can exceed 4 MiB even when the compressed bundle is about 100 MiB.
+# Bound the uncompressed manifest independently of the payload archive size.
+MAX_BUNDLE_MANIFEST_BYTES = 64 * 1024 * 1024
+
+
 def require(value, message):
     if not value:
         raise ValueError(message)
@@ -46,6 +52,24 @@ def _absolute(value):
     require(path.is_absolute() and ".." not in path.parts, "require canonical absolute paths")
     require(path == path.resolve(), "symlink/noncanonical registration path")
     return path
+
+
+def _bundle_manifest(path):
+    """Read only the already hash-bound manifest, with a fixed memory bound."""
+    with tarfile.open(path, "r|gz") as archive:
+        for member in archive:
+            if member.name != "penguin-bench/bundle.json":
+                continue
+            require(member.isfile() and member.size > 0, "invalid source bundle manifest")
+            require(member.size <= MAX_BUNDLE_MANIFEST_BYTES,
+                    f"source bundle manifest exceeds {MAX_BUNDLE_MANIFEST_BYTES} bytes")
+            with archive.extractfile(member) as stream:
+                blob = stream.read(member.size + 1)
+            require(len(blob) == member.size, "source bundle manifest length mismatch")
+            manifest = json.loads(blob)
+            require(isinstance(manifest, dict), "invalid source bundle manifest object")
+            return manifest
+    raise ValueError("missing source bundle manifest")
 
 
 def _inputs(req, validate_config):
@@ -87,15 +111,7 @@ def _inputs(req, validate_config):
     # Full payload/duplicate validation belongs to source_bundle.py and the
     # frozen preflight. The archive SHA above binds that exact verified input;
     # this read only needs its manifest, never a getmembers() payload scan.
-    bundle = None
-    with tarfile.open(deploy["bundle"], "r|gz") as archive:
-        for member in archive:
-            if member.name != "penguin-bench/bundle.json":
-                continue
-            require(member.isfile() and member.size < 4 * 1024 * 1024, "invalid source bundle manifest")
-            bundle = json.load(archive.extractfile(member))
-            break
-    require(bundle is not None, "missing source bundle manifest")
+    bundle = _bundle_manifest(deploy["bundle"])
     require(bundle["schema"] == "evo-harness-source-bundle-v1"
             and bundle["source_commit"] == config["versions"]["penguin_commit"]
             and bundle["penguin_version"] == adapter["penguin_version"]
