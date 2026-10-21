@@ -1,0 +1,50 @@
+{
+  "protocol": "evo-harness-gdpevo-v1",
+  "group": "005",
+  "train_ids": [
+    "train_001",
+    "train_002",
+    "train_003",
+    "train_004",
+    "train_005"
+  ],
+  "test_ids": [
+    "tg005-test-001",
+    "tg005-test-002",
+    "tg005-test-003",
+    "tg005-test-004",
+    "tg005-test-005"
+  ],
+  "training_passes": 1,
+  "attempts_per_task": 1,
+  "batch_count": 1,
+  "test_repeats": 1,
+  "learning_repeats": 1,
+  "train_concurrency": 1,
+  "test_concurrency": 4,
+  "feedback": "train-api-score-correct",
+  "empty_policy": "reuse-h0",
+  "harbor_version": "0.23.0",
+  "penguin_version": "0.2.16",
+  "compilation_reserve_sec": 3600,
+  "runtime": {
+    "provider": null,
+    "model_id": null,
+    "thinking_level": null
+  },
+  "paid_authorized": false,
+  "budget_usd": null,
+  "versions": {
+    "penguin_base": "8aa761232bf6a0463c9131cc3cc93038927099ed",
+    "benchmark_base": "893563466fd1a860da4e42270b8e30dfd67f2d40",
+    "gdpevo_source": "56d60ae4ae5e067d1ec0ee1f850622e69f422179",
+    "evo_official": "3c7c7b8c62a3f07da1d4407aa03f0ca079954bcf"
+  },
+  "adaptations": [
+    "five-task batch",
+    "frozen held-out transfer",
+    "solver-led semantic selection",
+    "UTF-8 byte injection budget",
+    "Penguin configured model instead of Bedrock default"
+  ]
+}

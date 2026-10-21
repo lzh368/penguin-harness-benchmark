@@ -66,6 +66,12 @@ if [ "$SERVER_READY" = true ] && [ -n "${PB_MAX_TURNS:-}" ]; then
 fi
 if [ "$CONFIG_READY" = true ]; then
   # 2. The Task itself.
+  # --source is hidden and ignored in current 0.2.16. Probe the installed CLI
+  # without a model call; advertised legacy options keep benchmark provenance.
+  SOURCE_ARGS=()
+  if "$PENGUIN" run --help 2>/dev/null | grep -q -- '--source'; then
+    SOURCE_ARGS=(--source benchmark)
+  fi
   TIMEOUT_ARGS=()
   if [ -n "${PB_TIMEOUT:-}" ]; then
     TIMEOUT_ARGS=(--timeout "$PB_TIMEOUT")
@@ -74,7 +80,7 @@ if [ "$CONFIG_READY" = true ]; then
     --workspace "$WORKSPACE" \
     --project-id "$PB_PROJECT" --agent-id "$PB_AGENT" \
     --provider "$PB_PROVIDER" --model-id "$PB_MODEL" \
-    --thinking "$PB_THINKING" --approve allow-all --source benchmark \
+    --thinking "$PB_THINKING" --approve allow-all "${SOURCE_ARGS[@]}" \
     "${TIMEOUT_ARGS[@]}" --json \
     >"$OUT/penguin-run.json" 2>"$OUT/penguin-run.stderr"
   RUN_RC=$?
