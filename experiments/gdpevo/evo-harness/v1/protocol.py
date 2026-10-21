@@ -109,7 +109,7 @@ def prepare_trainer(req):
     hook_files = evo.filemap(hooks)
     require(set(hook_files) == {"hooks.json", "guard.mjs", "icon.svg"}, "supply the native installed Evo hook package")
     manifest = read(hooks / "hooks.json")
-    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.3",
+    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.4",
             "wrong native method hook package")
     for point in ("user_prompt", "pre_tool_use", "stop"):
         require(len(manifest[point]) == 1 and manifest[point][0]["command"] == "guard.mjs",
@@ -221,6 +221,7 @@ def verify_export(req):
                     "canonical judge evidence mapping differs")
             for original, relative in evidence.items():
                 bind_path(original, private_file(relative))
+            bind_path(context["feedback"]["training_snapshot"], path_map[context["feedback"]["training_path"]])
     evo.validate_contexts(contexts, req["train_ids"], path_map)
     candidate_path = private_file(record["candidates_file"])
     decisions_path = private_file(record["decisions_file"])
@@ -249,7 +250,7 @@ def verify_export(req):
             bind_path(original, private_file(relative))
         for original, relative in audit["output_files"].items():
             bind_path(original, private_file(relative))
-        materials = list(audit["material_files"])
+        materials = audit["materials"]
         require(len(audit["outputs"]) == 1, "one role output required")
         if audit["role"] == "reflector":
             member = record["members"][audit["task_id"]]
@@ -264,8 +265,7 @@ def verify_export(req):
                     "Evolver did not read complete batch evidence")
             require(sha(path_map[audit["outputs"][0]]) == sha(decisions_path), "Evolver decisions differ")
         require(audit["role_text_path"] in materials, "role instructions not read")
-        evo.audit_role({"traces": audit["traces"], "binding": audit["binding"], "materials": materials,
-                        "outputs": audit["outputs"], "path_map": path_map})
+        evo.audit_role({**audit, "materials": materials, "path_map": path_map, "require_role_seal": True})
     require(reflected == read(candidate_path), "candidate concatenation differs from Reflector outputs")
     for binding in [c["trace"]["binding"] for c in contexts] + [a["binding"] for a in audits]:
         require(all(binding[k] == req["runtime"][k] for k in ("provider", "model_id")), "frozen runtime mismatch")

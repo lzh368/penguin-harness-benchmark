@@ -208,9 +208,10 @@ class ExportEvidenceTests(unittest.TestCase):
                          "config_sha256": getattr(self, "config_sha256", hashlib.sha256(b"SYNTHETIC frozen protocol").hexdigest()),
                          "private_learning": str(self.private), "answer_dir": str(self.submission / "answers"),
                          "feedback_dir": str(self.private / "feedback"), "runtime": self.runtime,
-                         "workspace": str(self.run), "training_budget_usd": 2}
+                         "workspace": str(self.run), "training_budget_usd": 2,
+                         "limits": {"general": 5, "topic": 5}, "max_entries": 5, "max_bytes": 16000}
         self.save(self.installed_helper.parent.parent / "training.json", self.training)
-        self.parent = self.traces / "synthetic-parent.jsonl"
+        self.parent = self.traces / "synthetic-training-root_001.jsonl"
         self.root_binding = {"session_id": "synthetic-training-root", "provider": "synthetic", "model_id": "no-model",
                              "source": "cli", "agent_state": str(self.installed_state), "workspace": str(self.run)}
         sessions = [f"synthetic-solver-{i}" for i in range(1, 6)]
@@ -249,7 +250,7 @@ class ExportEvidenceTests(unittest.TestCase):
                 rows += self.pair(f"synthetic-feedback-{offset}", json.dumps(self.evo.material({"path": str(fb), "offset": offset})),
                                  arguments={"cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(read_request)])})
             self.write_trace(trace, rows)
-            ctx = self.private / f"{task}-context.json"
+            ctx = self.private / "contexts" / (task + ".json")
             request = {"op": "capture", "split": "train", "task_id": task, "attempt_id": "attempt-1", "train_ids": self.train,
                        "answer": str(answer), "feedback": str(fb), "judge_request": str(judge_path),
                        "inputs": [str(inp)], "traces": [str(trace)],
@@ -257,12 +258,12 @@ class ExportEvidenceTests(unittest.TestCase):
             self.evo.capture(request)
             self.capture_requests.append(request)
             self.contexts.append(str(ctx))
-            candidate = {"id": f"synthetic-candidate-{i}", "task_id": task, "attempt_id": "attempt-1",
+            candidate = {"id": task + "-attempt-1-c01", "task_id": task, "attempt_id": "attempt-1",
                          "lesson": "SYNTHETIC inspect documented join keys", "trigger": "fictional join task", "scope_hint": "synthetic only",
                          "evidence": [{"kind": "input", "sha256": self.sha(inp), "claim": "SYNTHETIC documented key", "epistemic": "observed"}]}
             if not correct:
                 self.candidates.append(candidate)
-                output = self.save(self.private / f"reflector-{i}.json", [candidate])
+                output = self.save(self.private / "roles" / task / "candidates.json", [candidate])
                 self.roles.append(self.role("reflector", f"synthetic-reflector-{i}", [self.role_text, ctx], output, task))
         self.library = self.save(self.private / "prebatch-library.json", [])
         self.candidate_path = self.save(self.private / "candidates.json", self.candidates)
@@ -337,11 +338,40 @@ class ExportEvidenceTests(unittest.TestCase):
         return rows
 
     def role(self, name, session, materials, output, task=None):
+        # Real deterministic self-seal execution against synthetic original
+        # native traces; no provider, model or service is invoked here.
+        contract = self.evo.role_contract(self.training, name, task)
+        role_text = Path(contract["materials"][0])
+        if not role_text.exists():
+            self.save_text(role_text, self.role_text.read_text())
+        self.assertEqual(str(output), contract["output"])
+        materials = contract["materials"]
         binding = self.binding(session)
-        trace = self.traces / f"{session}.jsonl"
-        self.write_trace(trace, self.trace_rows(binding, materials, [output]))
-        result = {"role": name, "traces": [str(trace)], "binding": binding, "materials": [str(p) for p in materials],
-                  "outputs": [str(output)], "role_text_path": str(self.role_text)}
+        trace = self.traces / f"{session}_001.jsonl"
+        prompt = json.dumps({"evo_role_seal": {**contract, "parent_session_id": self.root_binding["session_id"]}})
+        call = {"prompt": prompt, "description": "SYNTHETIC " + name, "provider": self.runtime["provider"], "model_id": self.runtime["model_id"]}
+        slot = name + "/" + (task or "batch-1")
+        ticket = {"schema": 2, "session_id": self.root_binding["session_id"], "phase": name, "task_id": task, "slot": slot, "call": call}
+        self.save(self.private / "dispatch" / (session + ".json"), ticket)
+        call_id = "dispatch-" + session
+        canonical = json.dumps(call, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        self.save(self.private / "dispatch" / (self.evo.digest(slot.encode()) + ".claimed.json"),
+                  {"tool_call_id": call_id, "request_sha256": self.evo.digest(canonical.encode())})
+        with self.parent.open("a") as handle:
+            handle.write(json.dumps({"type": "model_msg", "payload": {"type": "tool_call", "name": "run_subagent", "tool_call_id": call_id, "arguments": json.dumps(call)}}) + "\n")
+        rows = self.trace_rows(binding, materials, [], prompt)
+        rows[1]["payload"]["sender"] = "parent_agent"
+        request = {"op": "seal-role-output", "role": name, **({"task_id": task} if task else {})}
+        request_path = self.save(self.private / "requests" / (session + "-seal.json"), request)
+        pending = self.pair("seal-" + session, "", arguments={"cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(request_path)])})
+        self.write_trace(trace, rows + [pending[0]])
+        with patch.dict(os.environ, PENGUIN_SESSION_ID=session):
+            receipt = self.evo.execute(request, str(request_path))
+        self.assertTrue(receipt["complete"])
+        pending[1]["payload"]["output"] = json.dumps(receipt)
+        self.write_trace(trace, rows + pending)
+        result = {"role": name, "traces": [str(trace)], "binding": binding, "materials": materials,
+                  "outputs": [str(output)], "role_text_path": str(role_text)}
         if task is not None:
             result["task_id"] = task
         return result
@@ -371,9 +401,9 @@ class ExportEvidenceTests(unittest.TestCase):
         trace = Path(role["traces"][0])
         original = trace.read_text()
         rows = [json.loads(r) for r in original.splitlines()]
-        for dropped in ("synthetic-material-0-4000", "synthetic-output-0"):
+        for dropped in ("synthetic-material-0-4000", "seal-" + role["binding"]["session_id"]):
             self.write_trace(trace, [r for r in rows if r.get("payload", {}).get("tool_call_id") != dropped])
-        with self.assertRaisesRegex(ValueError, "fully read|sealed in native trace"):
+            with self.assertRaisesRegex(ValueError, "fully read|sealed in native trace"):
                 self.evo.audit_role(role)
         trace.write_text(original)
 
@@ -622,7 +652,9 @@ class ExportEvidenceTests(unittest.TestCase):
         self.write_trace(parent_segment, [{"type": "session_meta", "payload": self.root_binding},
             {"type": "event_msg", "payload": {"type": "subagent", "session_id": role["binding"]["session_id"]}}])
         role["binding"]["parent_trace"] = str(parent_segment)
-        self.write_trace(Path(role["traces"][0]), self.trace_rows(role["binding"], role["materials"], role["outputs"]))
+        rows = [json.loads(line) for line in Path(role["traces"][0]).read_bytes().splitlines()]
+        rows[0]["payload"] = role["binding"]
+        self.write_trace(Path(role["traces"][0]), rows)
         record = self.evo.seal_training(self.seal_request)
         self.assertEqual(record["training_root"], self.root_binding)
         moved = self.root / "exported-with-compaction"
