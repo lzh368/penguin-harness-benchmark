@@ -26,6 +26,10 @@ class IncompleteSkillObservation(ValueError):
     """Missing read evidence; never a substitute for actual State identity."""
 
 
+class GeneralBodyRead(ValueError):
+    """A loading-policy deviation, distinct from a missing or forged trial."""
+
+
 def _native_read(pairs, path, raw, workspace, slot, inspection, skill_files=None):
     lines, observed = raw.decode().split("\n"), {}
     if lines[-1] == "":
@@ -80,8 +84,8 @@ def reject_general_body_reads(pairs, forbidden, workspace, inspection):
     for call, _ in pairs:
         if call.get("name") == "read_file":
             args = json.loads(call["arguments"])
-            require(inspection._path(args.get("file_path"), workspace) not in forbidden,
-                    "general Skill body read violates description-only loading")
+            if inspection._path(args.get("file_path"), workspace) in forbidden:
+                raise GeneralBodyRead("general Skill body read violates description-only loading")
         elif call.get("name") == "exec_command":
             try:
                 commands, workdir, _ = inspection._shell_commands(call, workspace)
@@ -95,8 +99,8 @@ def reject_general_body_reads(pairs, forbidden, workspace, inspection):
                 if argv[0] not in ("cat", "head"):
                     continue
                 paths = [inspection._path(value, workdir) for value in inspection._file_operands(argv)]
-                require(not forbidden.intersection(paths),
-                        "general Skill body read violates description-only loading")
+                if forbidden.intersection(paths):
+                    raise GeneralBodyRead("general Skill body read violates description-only loading")
 
 def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_policy="strict"):
     require(audit_policy in ("strict", "record-only"), "unknown trial audit policy")
@@ -283,8 +287,14 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_p
     all_files, required_files, forbidden_files = loading_files(frozen, evo, acceptance)
     skill_files = {state + "/" + name: raw for name, raw in required_files.items()}
     forbidden = {state + "/" + name for name in forbidden_files}
-    reject_general_body_reads([(call, outputs.get(key, {})) for key, call in calls.items()],
-                              forbidden, meta["workspace"], inspection)
+    try:
+        reject_general_body_reads([(call, outputs.get(key, {})) for key, call in calls.items()],
+                                  forbidden, meta["workspace"], inspection)
+    except GeneralBodyRead as exc:
+        # A real completed measurement remains collectable. It must not pass
+        # the loading audit, or silently disappear from a diagnostic matrix.
+        # Strict audits still raise; frozen record-only audits retain failure.
+        audit(False, "general_body_read", str(exc))
     observed = {}
     automatic = config.get("context_transport") == "agents-md-v1"
     context_receipt = None
