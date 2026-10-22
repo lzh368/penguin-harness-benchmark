@@ -58,8 +58,9 @@ class RecompileTests(unittest.TestCase):
         meta={'session_id':'parent','source':'cli','workspace':str(self.root),'agent_state':str(self.root/'agent_state'),'provider':'fixture','model_id':'no-model'}
         def write_rows(path,rows):path.write_text(''.join(json.dumps(row)+'\n'for row in rows))
         write_rows(parent,[{'type':'session_meta','payload':meta},{'type':'model_msg','payload':{'type':'tool_call','name':'run_subagent','arguments':json.dumps(call),'tool_call_id':'dispatch'}},
-            {'type':'event_msg','payload':{'type':'subagent','session_id':'child'}}])
-        childmeta={**meta,'session_id':'child','source':'subagent','parent_trace':str(parent)}
+            {'type':'event_msg','payload':{'type':'subagent','session_id':'child'}},
+            {'type':'model_msg','payload':{'type':'tool_call_output','tool_call_id':'dispatch','output':'subagent running','stop_reason':'completed'}}])
+        childmeta={**meta,'session_id':'child','source':'subagent'}
         write_rows(child1,[{'type':'session_meta','payload':childmeta},{'type':'model_msg','payload':{'type':'text','role':'user','sender':'parent_agent','text':prompt}}])
         write_rows(child2,[{'type':'session_meta','payload':childmeta},{'type':'model_msg','payload':{'type':'tool_call','name':'write_file','arguments':'{}','tool_call_id':'write'}},
             {'type':'model_msg','payload':{'type':'tool_call_output','tool_call_id':'write','output':'SYNTHETIC written','stop_reason':'completed'}}])
@@ -67,6 +68,24 @@ class RecompileTests(unittest.TestCase):
         save(self.root/'launch-receipt.json',{'sessionId':'parent'})
         session,view=recompile_tools.original_child(m,self.evo,self.control)
         self.assertEqual(session,'child');self.assertEqual(len(view['sources']),2);self.assertEqual(len(view['pairs']),1)
+        self.assertEqual(view['binding']['parent_trace'],str(parent))
+        rows=[json.loads(line)for line in parent.read_text().splitlines()]
+        actual={**call,'description':'原生显示标签','description_note':'display only','yield_time_ms':1000}
+        rows[1]['payload']['arguments']=json.dumps(actual);write_rows(parent,rows)
+        self.assertEqual(recompile_tools.original_child(m,self.evo,self.control)[0],'child')
+        for key,value in [('prompt_sha256','0'*64),('thinking_level','low'),('agent_id','other'),('model_id','wrong')]:
+            rows[1]['payload']['arguments']=json.dumps({**actual,key:value});write_rows(parent,rows)
+            with self.subTest(changed=key),self.assertRaisesRegex(AssertionError,'dispatch/child event'):
+                recompile_tools.original_child(m,self.evo,self.control)
+        rows[1]['payload']['arguments']=json.dumps(actual)
+        rows[2]['payload']['session_id']='other';write_rows(parent,rows)
+        with self.assertRaisesRegex(AssertionError,'dispatch/child event'):
+            recompile_tools.original_child(m,self.evo,self.control)
+        rows[2]['payload']['session_id']='child'
+        rows[3]['payload']['stop_reason']='fatal';write_rows(parent,rows)
+        with self.assertRaisesRegex(AssertionError,'dispatch/child event'):
+            recompile_tools.original_child(m,self.evo,self.control)
+        rows[3]['payload']['stop_reason']='completed';write_rows(parent,rows)
         prompt_path.write_text('SYNTHETIC altered unauthorized prompt')
         with self.assertRaisesRegex(AssertionError,'complete prepared training prompt'):
             recompile_tools.original_child(m,self.evo,self.control)

@@ -75,15 +75,37 @@ def original_child(m, evo, control):
     session = next(iter(matched))
     values = sessions[session]
     meta = values[0][1]
-    parent = Path(meta['parent_trace'])
-    parent_rows = [json.loads(line) for line in parent.read_text().splitlines() if line]
-    assert any(row.get('type') == 'session_meta' and row['payload']['session_id'] == launch['sessionId'] for row in parent_rows)
     dispatch = read(m['evolver_call'])
     assert all(dispatch[k] == m['runtime'][k] for k in ('provider', 'model_id', 'thinking_level'))
-    assert any(not row.get('origin') and row.get('payload', {}).get('type') == 'tool_call'
-               and row['payload'].get('name') == 'run_subagent'
-               and json.loads(row['payload']['arguments']) == dispatch for row in parent_rows), 'original native dispatch differs'
-    binding = {k: meta[k] for k in ('session_id', 'source', 'agent_state', 'workspace', 'provider', 'model_id', 'parent_trace')}
+    # The frozen native runtime records parentage in the parent's subagent event,
+    # not a parent_trace field on child session_meta. Bind that event to the
+    # completed dispatch call, rather than inventing or rewriting child metadata.
+    inert = {'description', 'description_note', 'yield_time_ms'}
+    semantic = lambda value: {k: v for k, v in value.items() if k not in inert}
+    links = []
+    for parent in sorted(root.rglob(launch['sessionId'] + '*.jsonl')):
+        parent_rows = [json.loads(line) for line in parent.read_text().splitlines() if line]
+        assert any(row.get('type') == 'session_meta' and row['payload']['session_id'] == launch['sessionId']
+                   and not row.get('origin') for row in parent_rows)
+        for index, row in enumerate(parent_rows):
+            call = row.get('payload', {})
+            if row.get('origin') or call.get('type') != 'tool_call' or call.get('name') != 'run_subagent':
+                continue
+            if semantic(json.loads(call['arguments'])) != semantic(dispatch):
+                continue
+            tail = parent_rows[index + 1:]
+            end = next((i for i, value in enumerate(tail) if not value.get('origin')
+                        and value.get('payload', {}).get('type') == 'tool_call_output'
+                        and value['payload'].get('tool_call_id') == call['tool_call_id']), None)
+            if end is None or tail[end]['payload'].get('stop_reason') != 'completed':
+                continue
+            events = [value['payload']['session_id'] for value in tail[:end] if not value.get('origin')
+                      and value.get('type') == 'event_msg' and value.get('payload', {}).get('type') == 'subagent']
+            if events == [session]:
+                links.append(str(parent))
+    assert len(links) == 1, 'original native dispatch/child event differs or is ambiguous'
+    binding = {k: meta[k] for k in ('session_id', 'source', 'agent_state', 'workspace', 'provider', 'model_id')}
+    binding['parent_trace'] = links[0]
     assert binding['provider'] == m['runtime']['provider'] and binding['model_id'] == m['runtime']['model_id']
     view = evo.trace_view([str(p) for p, _ in values], binding)
     return session, view
