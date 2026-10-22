@@ -147,8 +147,8 @@ const evo = path.join(
   source,
   "plugins/evo-harness-rsi-toolkit/skills/evo-harness-rsi-toolkit/scripts/evo.py",
 );
-// Build exactly 16000 total bytes, including Reader/metadata, without relying
-// on a guessed framing size or overlong lines. No model or task material.
+// Find the largest package fitting BOTH stored bytes and actual native context
+// framing/metadata. No model or task material; no guessed overhead.
 execFileSync("python3", ["-B", "-c", `
 import importlib.util,json,sys
 from pathlib import Path
@@ -165,7 +165,14 @@ while low<=high:
     try: raw=evo.render_package([entry(n),fixed],16000)
     except ValueError: high=n-1
     else: best=entry(n);low=n+1
-assert sum(map(len,evo.render_package([best,fixed],16000).values()))==16000
+raw=evo.render_package([best,fixed],16000)
+context=evo.model_context(raw)
+stored=sum(map(len,raw.values()))
+assert stored<=16000 and context['injected_bytes']<=16000
+try: evo.render_package([entry(high+1),fixed],16000)
+except ValueError: pass
+else: raise AssertionError('next larger package must exceed a frozen budget')
+Path(sys.argv[2]).with_suffix('.boundary.json').write_text(json.dumps({'stored_bytes':stored,'injected_bytes':context['injected_bytes'],'max_bytes':16000,'next_byte_rejected':True}))
 Path(sys.argv[2]).write_text(json.dumps([best,fixed]))
 `, evo, path.join(tmp, "library.json")]);
 const skill = path.join(original, "skills/evo-harness-learned");
@@ -305,6 +312,7 @@ for (const name of ["read_file", "exec_command"]) {
 }
 session.dispose();
 const after = inventory(installed);
+const budgetBoundary = JSON.parse(await fs.readFile(path.join(tmp, "library.boundary.json"), "utf8"));
 const equals = (a, b) => JSON.stringify(a.files) === JSON.stringify(b.files);
 const report = {
   synthetic_only: true,
@@ -325,6 +333,7 @@ const report = {
   loading_policy: "official-cl-context-body-general-description",
   required_skill_paths: [...requiredPaths].sort(),
   package_bytes: packageBytes,
+  budget_boundary: budgetBoundary,
   method_source: source,
   compiled_native_dependencies: built,
   probe_root: tmp,
@@ -336,7 +345,9 @@ if (
   !report.native_load_exact ||
   !report.after_exact ||
   !report.native_prompt_file_parameters ||
-  packageBytes !== 16000 || outputs.some(output => output.truncated || !output.complete)
+  packageBytes !== budgetBoundary.stored_bytes || packageBytes > 16000 ||
+  budgetBoundary.injected_bytes > 16000 || !budgetBoundary.next_byte_rejected ||
+  outputs.some(output => output.truncated || !output.complete)
 )
   throw new Error(JSON.stringify(report));
 await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");
