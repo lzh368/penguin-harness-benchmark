@@ -89,6 +89,14 @@ class NativeRecordTests(unittest.TestCase):
         self.assertTrue(self.run_record()["pending"])
         self.assertNotIn("cell", self.run_record())
 
+    def test_new_protocol_waits_for_original_job_not_only_terminal_trial(self):
+        self.f.config["versions"]["skill"]="2026.10.23.1"
+        trial=self.f.trials[0][0];job_result=trial.parent/"result.json"
+        test_injection.save(job_result,{"finished_at":None,"stats":{"n_running_trials":1}})
+        self.assertTrue(self.run_record()["pending"])
+        test_injection.save(job_result,{"finished_at":"synthetic-end","stats":{"n_running_trials":0}})
+        self.assertFalse(self.run_record()["pending"])
+
     def test_real_runtime_wrong_state_and_wrong_loaded_text_still_rejected(self):
         path = self.f.trials[0][0] / "result.json"
         original = protocol.read(path)

@@ -180,7 +180,16 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(trainer.exists())
         config_file.write_bytes(config_before + b"system_prompt: '{{AGENTS_MD}}'\n")
         evo.install_context({"state": str(base)})
+        broken = copy.deepcopy(hook_config)
+        broken["pre_tool_use"] = broken["pre_tool_use"][:1]
+        (hooks / "hooks.json").write_text(json.dumps(broken) + "\n")
+        with self.assertRaisesRegex(ValueError, "Solver stage entry"):
+            protocol.prepare_trainer(request)
+        self.assertFalse(trainer.exists())
+        (hooks / "hooks.json").write_text(json.dumps(hook_config) + "\n")
         prepared = protocol.prepare_trainer(request)
+        self.assertEqual(prepared["training"]["candidate_edit"], "native-draft-v1")
+        self.assertEqual(prepared["training"]["solver_stage"], "bound-post-judge-v1")
         self.assertEqual(prepared["training"]["max_bytes"], 16000)
         self.assertEqual(prepared["training"]["injection_mode"], "full_skill")
         self.assertEqual(prepared["training"]["reflection_mode"], "solver-session")

@@ -41,7 +41,7 @@ class RegistrationTests(unittest.TestCase):
             "api_host": "synthetic.invalid", "benchmark_id": "synthetic-train", "test_benchmark_id": "synthetic-test",
             "bundle_sha256": registration.sha(self.bundle), "image_manifest_sha256": registration.sha(image)})
         # This shared fixture deliberately tests the legacy .9 transport.
-        for key in ("context_transport", "reflection_evidence", "receipt_policy"):
+        for key in ("context_transport", "reflection_evidence", "receipt_policy", "candidate_edit", "solver_stage"):
             self.config.pop(key, None)
         self.config["versions"].update(penguin_commit="a" * 40, benchmark_commit="b" * 40, skill="2026.10.22.9")
         self.config["deployment"] = {"benchmark_checkout": str(self.repo), "penguin_home": str(self.project.parent),

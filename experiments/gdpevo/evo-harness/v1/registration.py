@@ -170,6 +170,9 @@ def _files(config, checked, phase):
                   "state_archive_template": str(Path(deploy["penguin_home"]) / deploy["project_id"] /
                       "benchmarks" / benchmark_id / ".jobs" / "<unique-job-name>.agent-state.tar.gz"),
                   "bundle_sha256": config["bundle_sha256"], "penguin_commit": config["versions"]["penguin_commit"],
+                  "wait_command": ["python3", "-B", str(Path(deploy["benchmark_checkout"]) /
+                      "experiments/gdpevo/evo-harness/v1/worker_job.py"), str(Path(deploy["penguin_home"]) /
+                      deploy["project_id"] / "benchmarks" / benchmark_id / ".jobs" / "<unique-job-name>")],
                   "task_toml_sha256": task["task_toml_sha256"], "solving_timeout_sec": task["solving_timeout_sec"]}
         statement = f"""# Evo-Harness GDPevo {config['group']} / {task_id}
 
@@ -197,6 +200,17 @@ trial-directory name, or rename a job after launch. A retry authorized by the
 unchanged native pre-start policy needs a new job and its own matching archive,
 packed from the same frozen State. Retain the earlier command, failure and
 no-Target-start evidence; do not reuse the previous attempt's archive path.
+Run the exact Harbor argv in the foreground of native `exec_command`; do not
+use shell `&` or `nohup` (native command cleanup reaps background children).
+If the native call yields a `process_id`, keep that handle and use
+`input_command` until the original process actually ends. A yielded call is not
+a completed Harbor job. The launch JSON's `wait_command` is a read-only entry:
+substitute the same job name to inspect/wait for that original job's terminal
+`result.json` and trial records. It never launches or retries. If the process
+has ended but the job is incomplete, preserve the pending records and report
+that condition; do not clean the environment or dispatch another Target.
+Inspect existing verifier evidence before deciding whether anything is missing;
+a cleanup exception alone does not authorize another answer or score.
 The launch already includes all `--ak` options, including Node and bundle pins;
 do not insert duplicates or use adapter defaults. Confirm the model-host helper
 agrees with the frozen allowed host. Credentials stay in private configuration.

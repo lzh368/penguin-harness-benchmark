@@ -43,9 +43,12 @@ def helper(path):
 
 def validate_config(config, repo):
     require(config["protocol"] == "evo-harness-gdpevo-v1", "unknown protocol")
-    if config["versions"]["skill"] == "2026.10.22.12":
+    if config["versions"]["skill"] in ("2026.10.22.12", "2026.10.23.1"):
         require(config.get("context_transport") == "agents-md-v1" and config.get("reflection_evidence") == "observed-v1"
                 and config.get("receipt_policy") == "native-trial-v1", "new method requires its explicit protocol revision")
+    if config["versions"]["skill"] == "2026.10.23.1":
+        require(config.get("candidate_edit") == "native-draft-v1"
+                and config.get("solver_stage") == "bound-post-judge-v1", "new draft permissions require native Solver stage enforcement")
     group = config["group"]
     require(group in ("003", "005", "010", "014", "018", "024"), "unsupported group")
     require(config["train_ids"] == [f"train_{i:03d}" for i in range(1, 6)], "requires all five train members")
@@ -127,8 +130,10 @@ def prepare_trainer(req):
     require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == config["versions"]["skill"],
             "wrong native method hook package")
     for point in ("user_prompt", "pre_tool_use", "stop"):
-        require(len(manifest[point]) == 1 and manifest[point][0]["command"] == "guard.mjs",
-                "missing native method guard")
+        expected_scopes = [None, "subagent"] if point == "pre_tool_use" and config.get("solver_stage") == "bound-post-judge-v1" else [None]
+        require([item.get("scope") for item in manifest[point]] == expected_scopes
+                and all(item["command"] == "guard.mjs" for item in manifest[point]),
+                "missing native method guard or original Solver stage entry")
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=target.parent) as tmp:
         stage = Path(tmp) / "agent_state"
@@ -136,8 +141,8 @@ def prepare_trainer(req):
         installed = stage / "skills/evo-harness-rsi-toolkit"
         shutil.copytree(skill, installed)
         shutil.copytree(hooks, stage / "hooks/evo-harness-rsi-toolkit")
-        # Only the training coordinator uses method hooks. Solver/test children
-        # retain native child semantics; H0 and final Target remain unchanged.
+        # Coordinator hooks remain root-only. The explicit child pre-tool entry
+        # gates registered original Solvers; H0 and final Target carry no hooks.
         yaml = (stage / "system_config.yaml").read_text()
         blocks = list(re.finditer(r"(?m)^hooks:[^\n]*\n(?:[ \t].*\n|\n)*", yaml))
         if blocks:
@@ -160,7 +165,7 @@ def prepare_trainer(req):
                     "host_operation_id": req["host_operation_id"], "config_sha256": req["config_sha256"],
                     "compilation_reserve_sec": config["compilation_reserve_sec"],
                     "solving_timeout_sec": checked["tasks"][0]["solving_timeout_sec"]}
-        for key in ("context_transport", "reflection_evidence", "receipt_policy"):
+        for key in ("context_transport", "reflection_evidence", "receipt_policy", "candidate_edit", "solver_stage"):
             if key in config:
                 training[key] = config[key]
         require(training["compilation_reserve_sec"] < training["solving_timeout_sec"], "invalid compilation reserve")

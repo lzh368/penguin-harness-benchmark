@@ -40,7 +40,7 @@
   "paid_authorized": false,
   "budget_usd": null,
   "versions": {
-    "skill": "2026.10.22.12",
+    "skill": "2026.10.23.1",
     "penguin_base": "8aa761232bf6a0463c9131cc3cc93038927099ed",
     "benchmark_base": "893563466fd1a860da4e42270b8e30dfd67f2d40",
     "gdpevo_source": "56d60ae4ae5e067d1ec0ee1f850622e69f422179",
@@ -56,5 +56,7 @@
   ],
   "context_transport": "agents-md-v1",
   "reflection_evidence": "observed-v1",
-  "receipt_policy": "native-trial-v1"
+  "receipt_policy": "native-trial-v1",
+  "candidate_edit": "native-draft-v1",
+  "solver_stage": "bound-post-judge-v1"
 }
