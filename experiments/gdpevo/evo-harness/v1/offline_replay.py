@@ -36,7 +36,10 @@ def validate_replay_config(config, repo):
             and config["max_bytes"] == 16000, "replay learning limits changed")
     require(config["paid_authorized"] is True and type(config["budget_usd"]) in (int, float)
             and 0 < config["budget_usd"] <= 10, "replay requires explicit per-run budget authorization")
-    require(config["versions"]["skill"] == "2026.10.22.9", "wrong replay method version")
+    require(config["versions"]["skill"] in ("2026.10.22.9", "2026.10.22.10"), "wrong replay method version")
+    require(config.get("audit_policy", "strict") in ("strict", "record-only"), "unknown replay audit policy")
+    require(config.get("audit_policy") != "record-only" or config["versions"]["skill"] == "2026.10.22.10",
+            "record-only cannot retroactively alter the old replay method")
     require(re.fullmatch(r"[0-9a-f]{64}", config["source_manifest_sha256"]) is not None
             and sha(config["source_manifest"]) == config["source_manifest_sha256"], "frozen source manifest changed")
     target_id(config)
@@ -158,12 +161,17 @@ def freeze(req, config):
             "replay freeze names another native Target State")
     require(acceptance.transported_filemap(expected_target, evo) == final["filemap"],
             "live replay Target differs from frozen State")
-    return {"schema": "evo-offline-replay-freeze-v1", "protocol": PROTOCOL, "complete": True,
+    result = {"schema": "evo-offline-replay-freeze-v1", "protocol": PROTOCOL, "complete": True,
         "config_sha256": req["config_sha256"], "source_manifest_sha256": config["source_manifest_sha256"],
         "learning_seal_sha256": sha(req["learning_seal"]), "frozen_package_sha256": package["sha256"],
         "equivalent_initial": equivalent, "initial": initial, "final": final,
         "test": registered["test"], "test_case_ids": registered["test"]["case_ids"],
         "runtime": config["runtime"], "test_repeats": 1, "model_calls": 0}
+    if config.get("audit_policy") == "record-only":
+        result.update({key: learned[key] for key in ("audit_passed", "audit_status", "audit_records")})
+        result.update(audit_policy="record-only", diagnostic_only=True,
+                      complete_means="frozen artifacts collected; not a validity certification")
+    return result
 
 
 def round_matrix(req, config):
@@ -203,11 +211,12 @@ def round_matrix(req, config):
         launch = read(benchmark / cell["case_id"] / "statement/harbor-launch.json")
         require(launch["task_id"] == frozen["test"]["case_to_task"][cell["case_id"]], "replay task mapping changed")
         receipts.append(injection._trial(trials[name][0], cell, snapshot,
-            {"runtime": config["runtime"], "benchmark": str(benchmark)}, evo, acceptance, launch, config))
+            {"runtime": config["runtime"], "benchmark": str(benchmark)}, evo, acceptance, launch, config,
+            audit_policy=config.get("audit_policy", "strict")))
     require(len({row["native_session_id"] for row in receipts}) == 5, "replay tests must use five fresh native Sessions")
     known = round(sum(row["cost"] for row in cells if row["cost"] is not None), 6)
     pending = [row["case_id"] for row in cells if row["cost"] is None]
-    return {"schema": "evo-offline-replay-test-matrix-v1", "protocol": PROTOCOL, "complete": True,
+    result = {"schema": "evo-offline-replay-test-matrix-v1", "protocol": PROTOCOL, "complete": True,
         "round": 1, "test_repeats": 1, "test": frozen["test"], "final": frozen["final"],
         "config_sha256": req["config_sha256"], "source_manifest_sha256": config["source_manifest_sha256"],
         "freeze_request_sha256": sha(req["freeze_request"]), "cells_sha256": sha(req["cells"]),
@@ -216,6 +225,67 @@ def round_matrix(req, config):
         "pending_test_cells": pending, "cost_complete": not pending,
         "scope": "Target trials only; main, learning and worker fees remain in native replay budget ledger"},
         "model_calls": 0, "new_training_calls": 0, "new_baseline_calls": 0}
+    if config.get("audit_policy") == "record-only":
+        statuses = [frozen["audit_status"], *(row["audit_status"] for row in receipts)]
+        status = "failed" if "failed" in statuses else "pending" if "pending" in statuses else "passed"
+        audit_record = {"schema": "evo-replay-measurement-audit-v1", "config_sha256": req["config_sha256"],
+            "source_manifest_sha256": config["source_manifest_sha256"], "audit_policy": "record-only",
+            "audit_status": status, "learning_audit_records": frozen["audit_records"],
+            "trials": [{k: row[k] for k in ("case_id", "session_id", "trial", "audit_status", "audit_issues", "trace_sha256")}
+                       for row in receipts], "diagnostic_only": True}
+        raw = evo.encoded(audit_record)
+        path = Path(req["freeze_request"]).parent / "trial-audits" / (acceptance.sha(raw) + ".json")
+        if path.exists():
+            require(path.is_file() and not path.is_symlink() and path.read_bytes() == raw, "replay audit record changed")
+        else:
+            evo.write_once(path, raw)
+        result.update(audit_policy="record-only", audit_status=status, audit_passed=status == "passed",
+            audit_records=[*frozen["audit_records"], str(path)], diagnostic_only=True,
+            complete_means="five real measurements collected; not a validity certification")
+    return result
+
+
+def measurement_record(req, config):
+    """Preserve original measured numbers before any diagnostic audit can fail.
+
+    This is an inventory, not acceptance: actual task/model fields are retained
+    so a mismatched trial can never be silently relabeled as the expected case.
+    """
+    deploy = config["deployment"]
+    jobs = Path(deploy["penguin_home"]) / deploy["project_id"] / "benchmarks" / config["test_benchmark_id"] / ".jobs"
+    measurements, scored = [], {}
+    for path in sorted(jobs.glob("*/*/result.json")):
+        require(path.resolve().is_relative_to(jobs.resolve()) and not path.is_symlink(), "diagnostic trial path escape")
+        record = {"result_path": str(path), "result_sha256": sha(path)}
+        try:
+            original = read(path)
+            value = (original.get("verifier_result") or {}).get("rewards", {}).get("reward")
+            valid = type(value) in (int, float) and 0 <= value <= 1
+            task = original.get("task_name")
+            record.update(task_name=task, trial_name=original.get("trial_name"),
+                score=round(value * 100, 2) if valid else None, reward=value if valid else None,
+                finished_at=original.get("finished_at"), exception_info=original.get("exception_info"),
+                model_name=(original.get("config") or {}).get("agent", {}).get("model_name"),
+                cost_usd=(original.get("agent_result") or {}).get("cost_usd"),
+                acceptance="not_certified")
+            if valid and original.get("finished_at"):
+                scored[task] = scored.get(task, 0) + 1
+        except (ValueError, KeyError, TypeError) as exc:
+            record.update(score=None, evidence_error=type(exc).__name__)
+        measurements.append(record)
+    value = {"schema": "evo-replay-original-measurements-v1", "config_sha256": req["config_sha256"],
+        "audit_policy": "record-only", "diagnostic_only": True, "measurements": measurements,
+        "duplicate_scored_tasks": sorted(task for task, count in scored.items() if count > 1),
+        "note": "Original trial measurements only; not an audit pass, task attribution or experiment validity certificate."}
+    raw = registration.encoded(value).encode()
+    path = Path(req["freeze_request"]).parent / "trial-audits" / (acceptance.sha(raw) + ".measurements.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        require(path.is_file() and not path.is_symlink() and path.read_bytes() == raw, "original measurements record changed")
+    else:
+        with path.open("xb") as stream:
+            stream.write(raw)
+    return str(path), value
 
 
 def execute(req):
@@ -228,7 +298,20 @@ def execute(req):
     if req["op"] == "verify-freeze":
         return freeze(req, config)
     if req["op"] in ("verify-round", "verify-test-matrix"):
-        return round_matrix(req, config)
+        if config.get("audit_policy") != "record-only":
+            return round_matrix(req, config)
+        path, measurements = measurement_record(req, config)
+        try:
+            require(not measurements["duplicate_scored_tasks"], "duplicate actual scored trials in one replay round")
+            result = round_matrix(req, config)
+        except (ValueError, KeyError, OSError, TypeError) as exc:
+            # Record and stop; this branch never converts a hard failure into
+            # successful acceptance or invents a score from worker prose.
+            result = {"protocol": PROTOCOL, "complete": False, "hard_failure": True,
+                "audit_policy": "record-only", "audit_passed": False, "audit_status": "failed",
+                "audit_error": str(exc), "diagnostic_only": True, "model_calls": 0}
+        result["measurement_record"] = path
+        return result
     raise ValueError("unsupported offline replay operation")
 
 

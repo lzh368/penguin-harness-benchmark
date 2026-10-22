@@ -21,6 +21,10 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+class IncompleteSkillObservation(ValueError):
+    """Missing read evidence; never a substitute for actual State identity."""
+
+
 def _native_read(pairs, path, raw, workspace, slot, inspection, skill_files=None):
     lines, observed = raw.decode().split("\n"), {}
     if lines[-1] == "":
@@ -50,7 +54,8 @@ def _native_read(pairs, path, raw, workspace, slot, inspection, skill_files=None
                 observed[int(match[1])] = match[2]
         if last < 0 and lines and all(observed.get(n) == line for n, line in enumerate(lines, 1)):
             last = pair[1]["_position"]
-    require(last >= 0, "frozen Skill not fully observed through native read_file or exact foreground cat")
+    if last < 0:
+        raise IncompleteSkillObservation("frozen Skill not fully observed through native read_file or exact foreground cat")
     return last
 
 
@@ -92,7 +97,32 @@ def reject_general_body_reads(pairs, forbidden, workspace, inspection):
                 require(not forbidden.intersection(paths),
                         "general Skill body read violates description-only loading")
 
-def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
+def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_policy="strict"):
+    require(audit_policy in ("strict", "record-only"), "unknown trial audit policy")
+    diagnostic = audit_policy == "record-only"
+    require(not diagnostic or (config.get("protocol") == "evo-harness-offline-replay-v1"
+            and config.get("audit_policy") == "record-only" and config["versions"]["skill"] == "2026.10.22.10"),
+            "record-only requires the new explicitly frozen replay method")
+    audit_issues = []
+    def audit(condition, code, message, status="failed"):
+        if condition:
+            return
+        if not diagnostic:
+            raise ValueError(message)
+        audit_issues.append({"code": code, "status": status, "message": message})
+    def artifact(name):
+        path = trial / "agent" / name
+        if diagnostic and not path.exists():
+            audit(False, "missing_receipt", "missing original receipt: " + name, "pending")
+            return {}
+        return read(path)
+    def recorded_fields(value, expected, message):
+        # Absent receipt fields are unknown; a recorded contradiction is not.
+        for key, wanted in expected.items():
+            if diagnostic and (key not in value or value[key] is None):
+                audit(False, "missing_receipt_field", message + ": " + key, "pending")
+            else:
+                require(value.get(key) == wanted, message)
     inspection = evo.inspection  # Explicitly loaded from this reviewed method source.
     result = read(trial / "result.json")
     metadata = result["agent_result"]["metadata"]
@@ -146,12 +176,11 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
     info = result["agent_info"]
     require(info["name"] == "penguin" and info["model_info"] == {
         "name": runtime["model_id"], "provider": runtime["provider"]}, "actual agent identity differs")
-    installed = read(trial / "agent/penguin-install.json")
-    require(installed["agent_state"] == "custom" and installed["install"] == "bundle"
-            and installed["bundle_sha256"] == config["bundle_sha256"]
-            and installed["node_version"] == config["adapter"]["node_version"]
-            and installed["penguin_version"] == config["adapter"]["penguin_version"],
-            "actual installed CLI/State differs from frozen bundle")
+    installed = artifact("penguin-install.json")
+    recorded_fields(installed, {"agent_state": "custom", "install": "bundle",
+        "bundle_sha256": config["bundle_sha256"], "node_version": config["adapter"]["node_version"],
+        "penguin_version": config["adapter"]["penguin_version"]},
+        "actual installed CLI/State differs from frozen bundle")
     require(result["exception_info"] is None and result["finished_at"]
             and metadata["status"] in ("completed", "timeout", "aborted"), "trial did not finish a valid scored execution")
     usage = result["agent_result"].get("model_usage")
@@ -161,8 +190,8 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
     require(metadata["provider"] == runtime["provider"] and metadata["model_id"] == runtime["model_id"]
             and metadata["thinking"] == runtime["thinking_level"], "trial runtime differs from frozen runtime")
     require(metadata["agent_state"] == "custom" and metadata.get("requests", 1) > 0, "trial did not run the assigned custom State")
-    require(metadata["native_sessions_idle"] is True and metadata["process_cleanup"] == "server_shutdown",
-            "trial cleanup evidence incomplete")
+    recorded_fields(metadata, {"native_sessions_idle": True, "process_cleanup": "server_shutdown"},
+                    "trial cleanup evidence incomplete")
     reward = result["verifier_result"]["rewards"]["reward"]
     evo.finite(reward, high=1)
     require(abs(cell["score"] - round(reward * 100, 2)) <= 1e-8, "cell score differs from original verifier")
@@ -173,19 +202,34 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
     duration = (datetime.fromisoformat(timing["finished_at"].replace("Z", "+00:00"))
                 - datetime.fromisoformat(timing["started_at"].replace("Z", "+00:00"))).total_seconds() * 1000
     require(duration >= 0 and abs(cell["duration_ms"] - duration) <= 1, "cell duration differs from original trial")
-    before, ready, after = (read(trial / "agent" / f"penguin-agent-state-{point}.json") for point in ("before", "ready", "after"))
+    before, ready, after = (artifact(f"penguin-agent-state-{point}.json") for point in ("before", "ready", "after"))
     expected = {name: digest(raw) for name, raw in frozen.items()}
-    require(before["schema"] == ready["schema"] == after["schema"] == "penguin-agent-state-files-v1", "unknown State evidence schema")
-    require(before["files"] == expected, "installed State differs from frozen native snapshot")
-    state = before["state"]
-    require(ready["state"] == after["state"] == state, "trial State path changed")
-    # A fresh native State freezes max_turns=-1 and the complete builtin tool
-    # table through the native config API before transport. Startup verifies
-    # the matching turn cap with GET only and refuses a frozen mismatch; an
-    # unnecessary PUT may reserialize YAML even if the value is unchanged.
-    # No startup rewrite is exempted from this exact-byte comparison.
-    require(ready["files"] == expected, "frozen State changed during native startup")
-    require(ready["files"] == after["files"], "frozen State changed during held-out test")
+    if not diagnostic:
+        require(before["schema"] == ready["schema"] == after["schema"] == "penguin-agent-state-files-v1", "unknown State evidence schema")
+        require(before["files"] == expected, "installed State differs from frozen native snapshot")
+        state = before["state"]
+        require(ready["state"] == after["state"] == state, "trial State path changed")
+        require(ready["files"] == expected, "frozen State changed during native startup")
+        require(ready["files"] == after["files"], "frozen State changed during held-out test")
+    else:
+        paths = []
+        for point, receipt in zip(("before", "ready", "after"), (before, ready, after)):
+            if receipt.get("state"):
+                paths.append(receipt["state"])
+            else:
+                audit(False, "missing_state_path", point + " State path not recorded", "pending")
+            if receipt.get("schema") != "penguin-agent-state-files-v1":
+                audit(False, "unknown_state_receipt", point + " State receipt schema missing/unrecognized", "pending")
+            hashes = receipt.get("files", {})
+            require(isinstance(hashes, dict), "State fingerprint inventory is not an object")
+            require(set(hashes) <= set(expected), "frozen State contains unexpected files")
+            for name, wanted in expected.items():
+                if hashes.get(name) is None:
+                    audit(False, "missing_state_fingerprint", point + ": " + name, "pending")
+                else:
+                    require(hashes[name] == wanted, "recorded State fingerprint differs from frozen snapshot")
+        require(not paths or len(set(paths)) == 1, "trial State path changed")
+        state = paths[0] if paths else None
     trace_root = trial / "agent/penguin/traces"
     sessions = {}
     for path in sorted(trace_root.rglob("*.jsonl")):
@@ -195,7 +239,7 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
         require(len(metas) == 1, "invalid native trace metadata")
         if metas[0]["session_id"] == metadata["session_id"]:
             sessions[str(path)] = (metas[0], rows)
-    require(sessions, "missing original test Session trace")
+    audit(bool(sessions), "missing_test_trace", "missing original test Session trace", "pending")
     calls, outputs, metas, hashes, requests, row_position = {}, {}, [], {}, 0, 0
     for path, (meta, rows) in sessions.items():
         metas.append(meta)
@@ -214,28 +258,42 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
                 ident = payload["tool_call_id"]
                 require(ident not in dest, "ambiguous native test tool evidence")
                 dest[ident] = {**payload, "_position": row_position}
-    meta = metas[0]
+    # Missing trace delivery is pending evidence. Contradictory identity or
+    # duplicate tool ids above are still hard errors, never ordinary omissions.
+    meta = metas[0] if metas else {"workspace": "/app"}
     fields = ("session_id", "source", "provider", "model_id", "workspace", "agent_state")
-    require(all(all(m[k] == meta[k] for k in fields) for m in metas), "test trace segment identity changed")
-    require(meta["source"] in ("cli", "benchmark") and meta["provider"] == runtime["provider"]
-            and meta["model_id"] == runtime["model_id"] and meta["agent_state"] == state,
-            "native test trace binding mismatch")
-    require(requests > 0 and set(calls) == set(outputs), "incomplete native request/action/observation pairing")
-    pairs = [(call, outputs[key]) for key, call in calls.items()]
+    if state is None and metas:
+        state = meta["agent_state"]  # Trace path is not a replacement fingerprint.
+    if state is None:
+        state = "/unobserved-native-state"
+    if metas:
+        require(all(all(m[k] == meta[k] for k in fields) for m in metas), "test trace segment identity changed")
+        require(meta["source"] in ("cli", "benchmark") and meta["provider"] == runtime["provider"]
+                and meta["model_id"] == runtime["model_id"] and meta["agent_state"] == state,
+                "native test trace binding mismatch")
+    audit(requests > 0 and set(calls) == set(outputs), "incomplete_observation_pairs",
+          "incomplete native request/action/observation pairing", "pending")
+    pairs = [(call, outputs[key]) for key, call in calls.items() if key in outputs]
     slot = state + "/skills/evo-harness-learned"
     package = acceptance.package_from_snapshot(frozen, evo)
     all_files, required_files, forbidden_files = loading_files(frozen, evo, acceptance)
     skill_files = {state + "/" + name: raw for name, raw in required_files.items()}
     forbidden = {state + "/" + name for name in forbidden_files}
-    reject_general_body_reads(pairs, forbidden, meta["workspace"], inspection)
-    observed = {path: _native_read(pairs, path, raw, meta["workspace"], slot, inspection,
-                                 skill_files=set(skill_files)) for path, raw in skill_files.items()}
-    read_observed = max(observed.values())
+    reject_general_body_reads([(call, outputs.get(key, {})) for key, call in calls.items()],
+                              forbidden, meta["workspace"], inspection)
+    observed = {}
+    for path, raw in skill_files.items():
+        try:
+            observed[path] = _native_read(pairs, path, raw, meta["workspace"], slot, inspection,
+                                          skill_files=set(skill_files))
+        except IncompleteSkillObservation as exc:
+            audit(False, "incomplete_skill_observation", str(exc) + ": " + path, "pending")
+    read_observed = max(observed.values()) if len(observed) == len(skill_files) else None
     # Read-only public inspection may precede the full Skill. Any business tool
     # call, answer write or nonpublic file read must follow its actual complete
     # observation, including when calls were issued concurrently.
     for call, _ in pairs:
-        if call["_position"] >= read_observed:
+        if read_observed is None or call["_position"] >= read_observed:
             continue
         if call.get("name") == "read_file":
             args = json.loads(call["arguments"])
@@ -243,22 +301,52 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
             require(path in skill_files or path == inspection.native_instructions(slot) or inspection._public_file(path, meta["workspace"]),
                     "nonpublic read preceded the complete Skill observation")
             continue
-        require(call.get("name") == "exec_command", "task action occurred before complete Skill observation")
-        inspection._readonly_commands(call, meta["workspace"], slot, skill_files=set(skill_files))
-    return {"case_id": cell["case_id"], "run": cell["run"], "trial": str(trial),
+        if call.get("name") != "exec_command":
+            audit(False, "action_before_full_observation", "task action occurred before complete Skill observation")
+            continue
+        try:
+            inspection._readonly_commands(call, meta["workspace"], slot, skill_files=set(skill_files))
+        except ValueError as exc:
+            if not diagnostic:
+                raise
+            # An unsupported preparation command is not proof of a hidden
+            # access. Explicit literal private file reads remain hard failures.
+            try:
+                commands, workdir, _ = inspection._shell_commands(call, meta["workspace"])
+            except (ValueError, TypeError, KeyError):
+                commands, workdir = [], meta["workspace"]
+            for command in commands:
+                argv = command["argv"]
+                if argv[0] == "cd" and len(argv) == 2:
+                    workdir = inspection._path(argv[1], workdir)
+                elif argv[0] in ("cat", "head"):
+                    for operand in inspection._file_operands(argv):
+                        path = inspection._path(operand, workdir)
+                        require(path in skill_files or path == inspection.native_instructions(slot)
+                                or inspection._public_file(path, meta["workspace"]),
+                                "nonpublic read preceded the complete Skill observation")
+            audit(False, "pre_read_command_unverified", str(exc))
+    loaded = {name: raw for name, raw in required_files.items() if state + "/" + name in observed}
+    result = {"case_id": cell["case_id"], "run": cell["run"], "trial": str(trial),
             "job": trial.parent.name, "state_archive": str(archive),
             "installed_state_filemap_sha256": digest(evo.encoded(expected)),
             "session_id": cell["session_id"], "native_session_id": metadata["session_id"],
             "skill_sha256": package["sha256"], "skill_bytes": sum(map(len, all_files.values())),
             "loading_policy": "official-cl-context-body-general-description",
             "skill_files": {name: digest(raw) for name, raw in all_files.items()},
-            "loaded_skill_files": {name: digest(raw) for name, raw in required_files.items()},
-            "loaded_skill_bytes": sum(map(len, required_files.values())),
+            "loaded_skill_files": {name: digest(raw) for name, raw in loaded.items()},
+            "loaded_skill_bytes": sum(map(len, loaded.values())),
             "entries": package["entries"], "read_observed_position": read_observed,
             "file_read_observed_positions": {name.removeprefix(state + "/"): position for name, position in observed.items()},
             "trace_sha256": hashes,
             "score": round(reward * 100, 2), "cost_status": metadata.get("cost_status", "unknown"),
             "cost": actual_cost, "duration_ms": round(duration)}
+    if diagnostic:
+        status = "failed" if any(item["status"] == "failed" for item in audit_issues) else "pending" if audit_issues else "passed"
+        result.update(audit_policy=audit_policy, audit_status=status, audit_passed=not audit_issues,
+                      audit_issues=audit_issues, diagnostic_only=True,
+                      required_skill_files={name: digest(raw) for name, raw in required_files.items()})
+    return result
 
 
 def verify_matrix(req, matrix, acceptance, evo, registration, validate_config):

@@ -235,6 +235,85 @@ class ReplayTests(unittest.TestCase):
         self.assertIsNone(result['matrix']['evaluation'])
 
 
+    def record_only(self):
+        self.config['versions']['skill'] = '2026.10.22.10'
+        self.config['audit_policy'] = 'record-only'
+        self.registration.save_config()
+        self.base['config_sha256'] = protocol.sha(self.registration.config_path)
+        self.freeze_request.update(self.base)
+        self.round_request.update(self.base)
+        save(self.freeze_path, self.freeze_request)
+        # New-version synthetic registration metadata, not an old live run.
+        config = self.benchmark / 'benchmark_config.toml'
+        config.write_text(config.read_text().replace('2026.10.22.9', '2026.10.22.10'))
+        self.penguin.verify_learning_seal.return_value.update(
+            audit_status='passed', audit_passed=True, audit_records=[])
+
+    def test_record_only_missing_skill_read_keeps_measurements_and_pending_audit(self):
+        self.record_only()
+        trace = self.trials[0][1]
+        rows = [json.loads(line) for line in trace.read_text().splitlines()]
+        rows = [row for row in rows if row.get('payload', {}).get('tool_call_id') != 'method-1']
+        trace.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+        result = replay.execute(self.round_request)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['audit_status'], 'pending')
+        self.assertFalse(result['audit_passed'])
+        self.assertEqual(result['matrix']['evaluation']['score'], 50)
+        self.assertEqual(len(result['trials'][0]['loaded_skill_files']), 1)
+        self.assertEqual(len(result['trials'][0]['required_skill_files']), 2)
+        self.assertTrue(Path(result['measurement_record']).is_file())
+        self.assertTrue(all(Path(p).is_file() for p in result['audit_records']))
+
+    def test_record_only_missing_state_receipt_is_pending_not_confirmed_mismatch(self):
+        self.record_only()
+        (self.trials[0][0] / 'agent/penguin-agent-state-before.json').unlink()
+        result = replay.execute(self.round_request)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['audit_status'], 'pending')
+        self.assertEqual(len(result['cells']), 5)
+
+    def test_record_only_confirmed_state_model_and_isolation_errors_preserve_raw_scores_then_stop(self):
+        self.record_only()
+        state_path = self.trials[0][0] / 'agent/penguin-agent-state-ready.json'
+        original_state = protocol.read(state_path)
+        state = copy.deepcopy(original_state)
+        state['files']['AGENTS.md'] = '0' * 64
+        save(state_path, state)
+        result = replay.execute(self.round_request)
+        self.assertFalse(result['complete'])
+        self.assertTrue(result['hard_failure'])
+        self.assertIn('fingerprint differs', result['audit_error'])
+        self.assertEqual([v['score'] for v in protocol.read(result['measurement_record'])['measurements']], [50] * 5)
+        save(state_path, original_state)
+        rawpath = self.trials[0][0] / 'result.json'
+        original = protocol.read(rawpath)
+        for mutate in (lambda d: d['config']['agent'].update(model_name='wrong/model'),
+                       lambda d: d['config']['environment'].update(extra_allowed_hosts=['forbidden.invalid'])):
+            bad = copy.deepcopy(original); mutate(bad); save(rawpath, bad)
+            result = replay.execute(self.round_request)
+            self.assertFalse(result['complete'])
+            self.assertTrue(result['hard_failure'])
+            self.assertEqual(len(protocol.read(result['measurement_record'])['measurements']), 5)
+        save(rawpath, original)
+
+    def test_record_only_order_audit_does_not_erase_valid_original_reward(self):
+        self.record_only()
+        trace = self.trials[0][1]
+        rows = [json.loads(line) for line in trace.read_text().splitlines()]
+        answer = [r for r in rows if r.get('payload', {}).get('tool_call_id') == 'answer']
+        rows = [r for r in rows if r.get('payload', {}).get('tool_call_id') != 'answer']
+        rows[2:2] = answer
+        trace.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+        result = replay.execute(self.round_request)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['audit_status'], 'failed')
+        self.assertEqual(result['matrix']['evaluation']['score'], 50)
+
+    def test_old_method_cannot_retroactively_enable_record_only(self):
+        with self.assertRaisesRegex(ValueError, 'retroactively'):
+            replay.validate_replay_config({**self.config, 'audit_policy': 'record-only'}, self.registration.repo)
+
     def test_real_penguin_source_and_native_learning_seal_through_raw_trials(self):
         """Reuse P's native-shaped six-role evidence, with no seal-boundary mock."""
         ptest = Path(self.tool).resolve().parents[3] / 'tests/test_replay.py'
