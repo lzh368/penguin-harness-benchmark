@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import protocol
 import recompile_tools
@@ -25,6 +27,24 @@ class RecompileTests(unittest.TestCase):
         self.addCleanup(sys.path.remove, str(Path(os.environ['EVO_TOOL']).parent))
         import evo, control
         self.evo, self.control = evo, control
+
+    def test_three_compatible_h0_rounds_reused_without_mixing_old_final(self):
+        cases=[f'case-{n}'for n in range(5)]
+        old_cells=save(self.root/'old-h0-cells.json',[{'case_id':case,'run':n,'score':10*n}for n in (1,2,3)for case in cases])
+        old_h0=save(self.root/'h0-matrix.json',{'cells':old_cells})
+        old_final=save(self.root/'final-matrix.json',{'cells':save(self.root/'old-final-cells.json',[{'case_id':case,'run':1,'score':1}for case in cases])})
+        save(self.root/'manifest.json',{'workspace':str(self.root),'kind':'training-recompilation-diagnostic-validation',
+            'source_hashes':{},'config':save(self.root/'config.json',{}),'old_matrices':{'h0':old_h0,'final':old_final}})
+        save(self.root/'freeze.json',{'h0_snapshot':'h0','final_snapshot':'final','test_case_ids':cases})
+        for n in (1,2,3):
+            for case in cases:save(self.root/'records'/f'r{n}-final-{case}.json',{'cell':{'case_id':case,'run':n,'score':40*n},'audit':{'audit_passed':True}})
+        with patch.object(recompile_tools,'modules',return_value=(None,None,None,SimpleNamespace(snapshot=lambda p:{'files':{}}))):
+            result=recompile_tools.main(self.root,'summary',[])
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['conditions']['h0']['reused_rounds'],[1,2,3])
+        self.assertEqual(result['conditions']['h0']['three_round_mean'],20)
+        self.assertEqual(result['conditions']['final']['three_round_mean'],80)
+        self.assertEqual(len(result['conditions']['final']['cells']),15)
 
     def test_same_candidates_compile_with_private_general_body_and_full_topic(self):
         contexts = [save(self.root / (f'train_{n:03d}.json'), {'split': 'train', 'task_id': f'train_{n:03d}',

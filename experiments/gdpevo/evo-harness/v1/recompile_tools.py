@@ -229,7 +229,7 @@ def main(workspace, op, args):
                 'three_round_mean': statistics.mean(means.values())if len(means)==3 else None,
                 'round_mean_sd': statistics.stdev(means.values())if len(means)==3 else None,
                 'audit_passed': all(v['audit'].get('audit_passed',True)for v in records),
-                'reused_rounds': [1]if phase=='h0'else [],
+                'reused_rounds': sorted({v['run'] for v in read(original['cells'])})if phase=='h0'else [],
                 'per_case': {case: {'scores': [v['score']for v in sorted(cells,key=lambda x:x['run'])if v['case_id']==case],
                     'mean': statistics.mean(v['score']for v in cells if v['case_id']==case),
                     'sd': statistics.stdev(v['score']for v in cells if v['case_id']==case)if sum(v['case_id']==case for v in cells)==3 else None}for case in freeze['test_case_ids'] if any(v['case_id']==case for v in cells)}}
