@@ -28,7 +28,7 @@ class FreezeTests(unittest.TestCase):
         self.final = fixture.root / "final-state"
         self.h0.mkdir()
         self.evo.export_skill({"library": str(fixture.library), "limits": fixture.limits,
-            "max_entries": 5, "max_bytes": 16000, "output": str(self.h0 / acceptance.SLOT)})
+            "max_bytes": 16000, "output": str(self.h0 / acceptance.SLOT)})
         (self.h0 / "system_config.yaml").write_text("version: 1\nsystem_prompt: |\n  SYNTHETIC frozen solver\nmemory:\n  enabled: false\n" + test_protocol.SYNTHETIC_OUTPUT_TOOLS)
         (self.h0 / "AGENTS.md").write_text("SYNTHETIC frozen agent guidance\n")
         shutil.copytree(self.h0, self.final)
@@ -76,8 +76,7 @@ class FreezeTests(unittest.TestCase):
         self.evo.compile_batch({"train_ids": f.train, "contexts": f.contexts, "candidates": str(f.candidate_path),
             "decisions": str(f.decisions), "library": str(f.library), "limits": f.limits, "output": str(f.compiled)})
         shutil.rmtree(f.submission / "skill")
-        self.evo.export_skill({"library": str(f.compiled), "limits": f.limits, "max_entries": 5,
-            "max_bytes": 16000, "output": str(f.submission / "skill")})
+        self.evo.export_skill({"library": str(f.compiled), "limits": f.limits,             "max_bytes": 16000, "output": str(f.submission / "skill")})
         f.record_path.unlink()
         self.evo.seal_training(f.seal_request)
         shutil.rmtree(self.final)
@@ -167,18 +166,25 @@ class FreezeTests(unittest.TestCase):
             self.verify()
         (self.h0 / acceptance.SLOT / "SKILL.md").write_text("SYNTHETIC changed reader")
         self.pack(self.h0, self.h0_archive)
-        with self.assertRaisesRegex(ValueError, "reader changed"):
+        with self.assertRaisesRegex(ValueError, "reader or full-Skill format changed"):
             self.verify()
 
-    def test_selection_count_and_byte_budget_cannot_change_with_learned_entries(self):
-        index_path = self.h0 / acceptance.SLOT / "index.json"
-        original = json.loads(index_path.read_bytes())
-        for field, value in (("max_entries", 4), ("max_bytes", 8000)):
-            with self.subTest(field=field):
-                index_path.write_bytes(self.evo.encoded({**original, field: value}))
-                self.pack(self.h0, self.h0_archive)
-                with self.assertRaisesRegex(ValueError, "selection budgets must remain frozen"):
+    def test_complete_skill_byte_budget_cannot_change_with_learned_entries(self):
+        for budget in (8000, 32000):
+            with self.subTest(budget=budget):
+                for state, archive in ((self.h0, self.h0_archive), (self.final, self.final_archive)):
+                    (state / acceptance.SLOT / "SKILL.md").write_bytes(self.evo.render_skill([], budget))
+                    config = state / "system_config.yaml"
+                    config.write_bytes(config.read_bytes().replace(b"104192", b"200192"))
+                    self.pack(state, archive)
+                with self.assertRaisesRegex(ValueError, "exactly 16000"):
                     self.verify()
+
+    def test_full_skill_snapshot_rejects_empty_extra_package_directory(self):
+        (self.h0 / acceptance.SLOT / "topic").mkdir()
+        self.pack(self.h0, self.h0_archive)
+        with self.assertRaisesRegex(ValueError, "nested package directories"):
+            self.verify()
 
     def test_only_learned_slot_and_plain_version_may_change(self):
         for filename in ("AGENTS.md", "tools/synthetic.py", "memory/synthetic.txt"):

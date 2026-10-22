@@ -39,7 +39,8 @@ class ControllerAcceptanceTests(unittest.TestCase):
             "benchmark_id": "synthetic-training-benchmark", "test_benchmark_id": "synthetic-test-benchmark",
             "trainer_agent_id": "synthetic-trainer", "test_agent_id": "synthetic-target",
             "deployment": registration.config["deployment"]}
-        checkout = next(path for path in self.tool.parents if (path / "packages/core/package.json").is_file())
+        checkout = Path(os.environ["EVO_NATIVE_CHECKOUT"]).resolve() if os.environ.get("EVO_NATIVE_CHECKOUT") else next(
+            path for path in self.tool.parents if (path / "packages/core/package.json").is_file())
         self.config["deployment"].update(penguin_checkout=str(checkout), node=shutil.which("node"))
         registration.preflight["pins"]["provider"] = self.runtime["provider"]
         registration.save_preflight()
@@ -73,7 +74,7 @@ class ControllerAcceptanceTests(unittest.TestCase):
             if not fixture.all_success:
                 shutil.rmtree(h0_state / "skills/evo-harness-learned")
                 self.evo.export_skill({"library": str(fixture.library), "limits": fixture.limits,
-                    "max_entries": 5, "max_bytes": 16000, "output": str(h0_state / "skills/evo-harness-learned")})
+                    "max_bytes": 16000, "output": str(h0_state / "skills/evo-harness-learned")})
                 (self.target / "system_config.yaml").write_text((self.target / "system_config.yaml").read_text().replace("version: 1", "version: 2"))
             for archive, state in ((self.h0, h0_state), (self.final, self.target)):
                 with tarfile.open(archive, "w:gz") as handle:
@@ -369,8 +370,10 @@ class ControllerAcceptanceTests(unittest.TestCase):
         self.assertFalse(accepted["equivalent_h0"])
         self.assertEqual(len(accepted["injection"]), 2)
         self.assertEqual(sum(len(phase["cells"]) for phase in accepted["injection"]), 10)
-        self.assertTrue(all(cell["bytes"] == 0 for cell in accepted["injection"][0]["cells"]))
-        self.assertTrue(all(cell["bytes"] > 0 for cell in accepted["injection"][1]["cells"]))
+        self.assertTrue(all(cell["entries"] == 0 and cell["skill_bytes"] > 0 for cell in accepted["injection"][0]["cells"]))
+        self.assertTrue(all(cell["entries"] > 0 and cell["skill_bytes"] > 0 for cell in accepted["injection"][1]["cells"]))
+        for phase in accepted["injection"]:
+            self.assertEqual({cell["skill_sha256"] for cell in phase["cells"]}, {phase["skill_sha256"]})
 
 
 if __name__ == "__main__":

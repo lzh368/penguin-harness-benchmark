@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 
 SLOT = "skills/evo-harness-learned"
+FULL_SKILL_MAX_BYTES = 16000
 
 
 def require(condition, message):
@@ -21,6 +22,14 @@ def sha(raw):
 
 def read(path):
     return json.loads(Path(path).read_bytes())
+
+
+def verify_skill_budget(package):
+    """The GDPevo experiment fixes this value; generic Evo exporters do not."""
+    require(type(package.get("max_bytes")) is int
+            and package["max_bytes"] == FULL_SKILL_MAX_BYTES,
+            "GDPevo complete Skill byte budget must be exactly 16000")
+    return package
 
 
 def config_version(raw):
@@ -53,8 +62,8 @@ def verify_output_budget(raw, max_bytes):
     """Native emitter syntax, not an inferred/default command output limit.
 
     A UTF-8 byte may require six JSON escape characters. Preserve the method's
-    16000-byte selection budget and reserve room for hashes and receipt keys.
-    Both foreground and resumed command output must carry that full receipt.
+    16000-byte complete-Skill budget and reserve room for native output wrappers.
+    Both foreground and resumed command output must carry the full file.
     """
     text = raw.decode()
     require(re.findall(r"(?m)^max_turns: (-?\d+)$", text) == ["-1"], "freeze native max_turns: -1 before transport")
@@ -65,7 +74,7 @@ def verify_output_budget(raw, max_bytes):
         require(len(blocks) == 1, "missing/duplicate native command output configuration")
         values = re.findall(r"(?m)^      maxOutputLength: ([0-9]+)$", blocks[0])
         require(len(values) == 1 and int(values[0]) >= required,
-                f"native {name} maxOutputLength must be at least {required} for complete selector receipts")
+                f"native {name} maxOutputLength must be at least {required} for complete Skill reads")
     return required
 
 
@@ -95,6 +104,8 @@ def _snapshot(path):
             require(len(parts) > 1 or member.isdir(), "agent_state root must be a directory")
             entries[name] = "dir" if member.isdir() else "file"
             if member.isdir():
+                require(not name.startswith("agent_state/" + SLOT + "/"),
+                        "full Skill snapshot cannot contain nested package directories")
                 continue
             stream = archive.extractfile(member)
             require(stream is not None, "snapshot file cannot be read")
@@ -111,14 +122,14 @@ def _snapshot(path):
 
 def package_from_snapshot(data, evo):
     selected = {name.removeprefix(SLOT + "/"): raw for name, raw in data.items() if name.startswith(SLOT + "/")}
-    require(selected, "snapshot learned slot is missing")
+    require(set(selected) == {"SKILL.md"}, "snapshot learned slot must contain only SKILL.md")
     with tempfile.TemporaryDirectory(prefix="evo-freeze-verify-") as temp:
         root = Path(temp)
         for name, raw in selected.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(raw)
-        return evo.validate_package(root)
+        return verify_skill_budget(evo.validate_package(root))
 
 
 def verify_freeze(req, verify_export, evo):
@@ -152,12 +163,12 @@ def verify_freeze(req, verify_export, evo):
     final_package = package_from_snapshot(final["files"], evo)
     require(h0_package["empty"] is True, "H0 must start with the valid empty learned reader")
     require(final_package == exported, "final snapshot learned slot differs from verified export")
-    h0_index = json.loads(h0["files"][SLOT + "/index.json"])
-    final_index = json.loads(final["files"][SLOT + "/index.json"])
+    h0_skill = evo.parse_skill(h0["files"][SLOT + "/SKILL.md"])
+    final_skill = evo.parse_skill(final["files"][SLOT + "/SKILL.md"])
     for state in (h0, final):
-        verify_output_budget(state["files"]["system_config.yaml"], h0_index["max_bytes"])
-    require(all(h0_index[key] == final_index[key] for key in ("max_entries", "max_bytes")),
-            "selection budgets must remain frozen between H0 and final")
+        verify_output_budget(state["files"]["system_config.yaml"], h0_skill["max_bytes"])
+    require(h0_skill["max_bytes"] == final_skill["max_bytes"],
+            "complete Skill byte budget must remain frozen between H0 and final")
     def outside_slot(files):
         return {name: raw for name, raw in files.items()
                 if name != "system_config.yaml" and not name.startswith(SLOT + "/")}

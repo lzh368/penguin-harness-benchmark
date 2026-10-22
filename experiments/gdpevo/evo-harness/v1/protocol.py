@@ -99,9 +99,12 @@ def prepare_trainer(req):
     require(all(not p.startswith("skills/") or p.startswith("skills/evo-harness-learned/") for p in files),
             "Trainer H0 may carry only the learned slot")
     require(not any(p.startswith("hooks/") for p in files), "H0 must not carry controller hooks")
-    evo.validate_package(base / "skills/evo-harness-learned")
-    helper(Path(__file__).with_name("acceptance.py")).verify_output_budget(
-        (base / "system_config.yaml").read_bytes(), read(base / "skills/evo-harness-learned/index.json")["max_bytes"])
+    base_package = evo.validate_package(base / "skills/evo-harness-learned")
+    require(base_package["empty"] is True, "Trainer must start from empty full-Skill H0")
+    acceptance = helper(Path(__file__).with_name("acceptance.py"))
+    acceptance.verify_skill_budget(base_package)
+    acceptance.verify_output_budget(
+        (base / "system_config.yaml").read_bytes(), base_package["max_bytes"])
     skill = Path(req["method_skill"])
     require(skill.is_dir() and not skill.is_symlink(), "method Skill missing")
     evo.filemap(skill)
@@ -109,7 +112,7 @@ def prepare_trainer(req):
     hook_files = evo.filemap(hooks)
     require(set(hook_files) == {"hooks.json", "guard.mjs", "icon.svg"}, "supply the native installed Evo hook package")
     manifest = read(hooks / "hooks.json")
-    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.21.11",
+    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.22.2",
             "wrong native method hook package")
     for point in ("user_prompt", "pre_tool_use", "stop"):
         require(len(manifest[point]) == 1 and manifest[point][0]["command"] == "guard.mjs",
@@ -136,7 +139,8 @@ def prepare_trainer(req):
             yaml = yaml.rstrip("\n") + "\nhooks:\n  enabled: true\n"
         (stage / "system_config.yaml").write_text(yaml)
         training = {"guard_version": 2, "train_ids": config["train_ids"], "attempt_id": "attempt-1",
-                    "limits": {"general": 5, "topic": 5}, "max_entries": 5, "max_bytes": 16000,
+                    "limits": {"general": 5, "topic": 5}, "max_bytes": base_package["max_bytes"],
+                    "injection_mode": "full_skill",
                     "runtime": config["runtime"], "workspace": "/app",
                     "private_learning": "/logs/agent/evo-harness", "answer_dir": "/app/submission/answers",
                     "feedback_dir": "/logs/agent/evo-harness/feedback",
@@ -271,7 +275,7 @@ def verify_export(req):
         require(all(binding[k] == req["runtime"][k] for k in ("provider", "model_id")), "frozen runtime mismatch")
     evo.verify_compilation({"train_ids": req["train_ids"], "contexts": [str(private_file(record["members"][t]["context_file"])) for t in req["train_ids"]],
         "candidates": str(candidate_path), "decisions": str(decisions_path), "library": str(library_path),
-        "limits": record["limits"], "max_entries": record["max_entries"], "max_bytes": record["max_bytes"],
+        "limits": record["limits"], "max_bytes": record["max_bytes"],
         "skill": str(submission / "skill"), "path_map": path_map})
     package = evo.validate_package(submission / "skill")
     require(package["sha256"] == record["skill_sha256"], "export fingerprint mismatch")

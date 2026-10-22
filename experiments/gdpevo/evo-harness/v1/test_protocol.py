@@ -119,7 +119,7 @@ class ProtocolTests(unittest.TestCase):
         library.write_text("[]")
         base = self.root / "base"
         evo.export_skill({"library": str(library), "limits": {"general": 5, "topic": 5},
-                          "max_entries": 5, "max_bytes": 16000, "output": str(base / "skills/evo-harness-learned")})
+                          "max_bytes": 16000, "output": str(base / "skills/evo-harness-learned")})
         (base / "system_config.yaml").write_text("version: 1\nmemory:\n  enabled: false\nhooks:\n  enabled: false\n" + SYNTHETIC_OUTPUT_TOOLS)
         (base / "AGENTS.md").write_text("SYNTHETIC fixed reader\n")
         here = Path(__file__).resolve().parent
@@ -141,7 +141,23 @@ class ProtocolTests(unittest.TestCase):
                    "method_skill": str(Path(self.tool).parents[1]), "method_hooks": str(hooks), "training_budget_usd": 2,
                    "host_operation_id": "synthetic-training-op",
                    "config_sha256": hashlib.sha256((here / "profile.json").read_bytes()).hexdigest()}
+        # A self-consistent larger/smaller package and output capacity must not
+        # redefine this experiment's whole-file budget before publication.
+        skill_file = base / "skills/evo-harness-learned/SKILL.md"
+        config_file = base / "system_config.yaml"
+        skill_before, config_before = skill_file.read_bytes(), config_file.read_bytes()
+        for budget in (8000, 32000):
+            with self.subTest(budget=budget):
+                skill_file.write_bytes(evo.render_skill([], budget))
+                config_file.write_bytes(config_before.replace(b"104192", b"200192"))
+                with self.assertRaisesRegex(ValueError, "exactly 16000"):
+                    protocol.prepare_trainer(request)
+                self.assertFalse(trainer.exists())
+        skill_file.write_bytes(skill_before)
+        config_file.write_bytes(config_before)
         prepared = protocol.prepare_trainer(request)
+        self.assertEqual(prepared["training"]["max_bytes"], 16000)
+        self.assertEqual(prepared["training"]["injection_mode"], "full_skill")
         self.assertEqual(prepared["training"]["training_budget_usd"], 2)
         self.assertEqual(prepared["training"]["host_operation_id"], "synthetic-training-op")
         self.assertEqual(prepared["training"]["config_sha256"], request["config_sha256"])
@@ -154,7 +170,7 @@ class ProtocolTests(unittest.TestCase):
         import tarfile
         with tarfile.open(archive) as f:
             names = f.getnames()
-        self.assertIn("skills/evo-harness-learned/select.py", names)
+        self.assertIn("skills/evo-harness-learned/SKILL.md", names)
         self.assertIn("skills/evo-harness-rsi-toolkit/training.json", names)
         self.assertIn("hooks/evo-harness-rsi-toolkit/hooks.json", names)
         self.assertIn("hooks/evo-harness-rsi-toolkit/guard.mjs", names)
@@ -178,6 +194,11 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differs from frozen"):
             protocol.prepare_trainer({**paid_request, "training_budget_usd": 4})
         self.assertFalse(Path(paid_request["output"]).exists())
+        (hooks / "hooks.json").write_text(json.dumps({**hook_config, "version": "2026.10.21.11"}))
+        with self.assertRaisesRegex(ValueError, "wrong native method hook package"):
+            protocol.prepare_trainer({**request, "output": str(self.root / "old-method")})
+        self.assertFalse((self.root / "old-method").exists())
+        (hooks / "hooks.json").write_text(json.dumps(hook_config) + "\n")
         (base / ".vault.toml").write_text("SYNTHETIC forbidden")
         with self.assertRaises(ValueError):
             protocol.prepare_trainer({**request, "output": str(self.root / "another")})
@@ -201,6 +222,7 @@ class ExportEvidenceTests(unittest.TestCase):
         self.installed_helper = self.installed_state / "skills/evo-harness-rsi-toolkit/scripts/evo.py"
         self.installed_helper.parent.mkdir(parents=True)
         shutil.copyfile(self.tool, self.installed_helper)
+        shutil.copyfile(Path(self.tool).with_name("inspection.py"), self.installed_helper.with_name("inspection.py"))
         self.evo = protocol.helper(self.installed_helper)
         self.runtime = getattr(self, "frozen_runtime", {"provider": "synthetic", "model_id": "no-model", "thinking_level": "high"})
         self.train = [f"train_{i:03d}" for i in range(1, 6)]
@@ -209,8 +231,12 @@ class ExportEvidenceTests(unittest.TestCase):
                          "private_learning": str(self.private), "answer_dir": str(self.submission / "answers"),
                          "feedback_dir": str(self.private / "feedback"), "runtime": self.runtime,
                          "workspace": str(self.run), "training_budget_usd": 2,
-                         "limits": {"general": 5, "topic": 5}, "max_entries": 5, "max_bytes": 16000}
+                         "limits": {"general": 5, "topic": 5}, "max_bytes": 16000,
+                         "injection_mode": "full_skill"}
         self.save(self.installed_helper.parent.parent / "training.json", self.training)
+        self.h0_skill = self.installed_state / "skills/evo-harness-learned/SKILL.md"
+        self.h0_skill.parent.mkdir(parents=True)
+        self.h0_skill.write_bytes(self.evo.render_skill([], 16000))
         self.parent = self.traces / "synthetic-training-root_001.jsonl"
         self.root_binding = {"session_id": "synthetic-training-root", "provider": "synthetic", "model_id": "no-model",
                              "source": "cli", "agent_state": str(self.installed_state), "workspace": str(self.run)}
@@ -242,6 +268,12 @@ class ExportEvidenceTests(unittest.TestCase):
             grant = {"evo_task": {"split": "train", "task_id": task, "attempt_id": "attempt-1", "inputs": [str(inp)]}}
             trace = self.traces / f"synthetic-solver-{i}.jsonl"
             rows = self.trace_rows(binding, [inp], [], json.dumps(grant))
+            skill_read = self.pair("synthetic-h0-read", "\n".join(
+                f"{n:6}\t{line}" for n, line in enumerate(
+                    self.h0_skill.read_text().removesuffix("\n").split("\n"), 1)),
+                name="read_file", arguments={"file_path": str(self.h0_skill)})
+            skill_read[1]["payload"]["stop_reason"] = "completed"
+            rows[2:2] = skill_read
             rows += self.pair("synthetic-judge", json.dumps(self.evo.judge_stdout(feedback)), arguments={
                 "cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(judge_path)])})
             for offset in range(0, max(len(fb.read_text()), 1), 4000):
@@ -278,12 +310,12 @@ class ExportEvidenceTests(unittest.TestCase):
         self.evo.compile_batch({"train_ids": self.train, "contexts": self.contexts, "candidates": str(self.candidate_path),
              "decisions": str(self.decisions), "library": str(self.library), "limits": self.limits, "output": str(self.compiled)})
         self.package = self.evo.export_skill({"library": str(self.compiled), "limits": self.limits,
-             "max_entries": 5, "max_bytes": 16000, "output": str(self.submission / "skill")})
+             "max_bytes": 16000, "output": str(self.submission / "skill")})
         self.record_path = self.private / "training-export.json"
         self.seal_request = {"private_learning": str(self.private), "train_ids": self.train, "contexts": self.contexts,
              "candidates": str(self.candidate_path), "decisions": str(self.decisions), "library": str(self.library),
              "roles": self.roles, "skill": str(self.submission / "skill"), "limits": self.limits,
-             "max_entries": 5, "max_bytes": 16000, "runtime": self.runtime, "output": str(self.record_path)}
+             "max_bytes": 16000, "runtime": self.runtime, "output": str(self.record_path)}
 
     @staticmethod
     def sha(path):
@@ -446,6 +478,34 @@ class ExportEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fully read"):
             self.evo.capture(changed)
 
+    def test_solver_h0_full_read_is_required_again_at_capture_and_compilation(self):
+        request = self.capture_requests[0]
+        trace = Path(request["traces"][0])
+        original = trace.read_bytes()
+        rows = [json.loads(line) for line in original.splitlines()]
+        context = protocol.read(self.contexts[0])
+        h0 = [row for row in rows if row.get("payload", {}).get("tool_call_id") == "synthetic-h0-read"]
+        without = [row for row in rows if row not in h0]
+        shortened = copy.deepcopy(rows)
+        next(row["payload"] for row in shortened if row.get("payload", {}).get("type") == "tool_call_output"
+             and row["payload"].get("tool_call_id") == "synthetic-h0-read")["output"] = "SYNTHETIC truncated H0"
+        try:
+            for name, changed in (("missing", without), ("truncated", shortened), ("late", without + h0)):
+                with self.subTest(name=name):
+                    self.write_trace(trace, changed)
+                    output = self.private / ("bad-h0-" + name + ".json")
+                    with self.assertRaises(ValueError):
+                        self.evo.capture({**request, "output": str(output)})
+                    self.assertFalse(output.exists())
+                    # Rehashing the context's raw trace is not enough: compile
+                    # acceptance must independently enforce the original read.
+                    altered = copy.deepcopy(context)
+                    altered["trace"] = self.evo.trace_view(request["traces"], request["binding"])
+                    with self.assertRaises(ValueError):
+                        self.evo.validate_contexts([altered] + [protocol.read(path) for path in self.contexts[1:]], self.train)
+        finally:
+            trace.write_bytes(original)
+
     def test_context_answer_and_input_body_tampering_are_rejected(self):
         context = json.loads(Path(self.contexts[0]).read_text())
         for field in ("answer", "input"):
@@ -505,7 +565,7 @@ class ExportEvidenceTests(unittest.TestCase):
         replacement = self.save(self.private / "unauthored-library.json", changed)
         shutil.rmtree(self.submission / "skill")
         package = self.evo.export_skill({"library": str(replacement), "limits": self.limits,
-            "max_entries": 5, "max_bytes": 16000, "output": str(self.submission / "skill")})
+            "max_bytes": 16000, "output": str(self.submission / "skill")})
         record["skill_sha256"] = package["sha256"]
         self.save(self.record_path, record)
         with self.assertRaisesRegex(ValueError, "compil|package"):

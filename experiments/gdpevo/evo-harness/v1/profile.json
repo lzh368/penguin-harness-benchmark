@@ -48,8 +48,9 @@
   "adaptations": [
     "five-task batch",
     "frozen held-out transfer",
-    "solver-led semantic selection",
-    "UTF-8 byte injection budget",
+    "full-context reference loading",
+    "single SKILL.md runtime organization",
+    "whole-file UTF-8 byte budget",
     "Penguin configured model instead of Bedrock default"
   ]
 }

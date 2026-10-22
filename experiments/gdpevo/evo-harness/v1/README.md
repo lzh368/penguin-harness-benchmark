@@ -164,7 +164,7 @@ candidate, decision and role audit records live under `/logs/agent/evo-harness`
 and export as agent logs. The training root invokes the method helper's
 `seal-training` operation after all native role traces have completed. Supply
 all five contexts, concatenated candidates, Evolver decisions, pre-batch library,
-frozen runtime and selection budgets, final package, and each role's original
+frozen runtime and the complete-Skill byte budget, final package, and each role's original
 trace/binding/material/output paths. Store audited material copies in the private
 learning directory before role delegation. Do not manually author a complete flag.
 The sealer verifies full chunk reads, role output hashes, and reconstructs the
@@ -190,28 +190,76 @@ command-output limits before transport: supported native loading/turn-cap setup
 is then byte-idempotent. All three complete State maps must equal the frozen
 snapshot; there is no blanket startup-rewrite exemption. Vault, memory and
 schedules are not read or retained by this inventory.
-The audit then checks the original test Session's full reader/index reads and
-one canonical selector stdout against the frozen package. Complete native
-read_file observations and a foreground single-file cat whose original stdout
-exactly matches the frozen bytes both prove a reader/index read. Before selection,
-only a conservatively parsed subset of read-only public-file/directory inspection
-is accepted; arbitrary code, APIs, task execution, file writes and entry-body
-reads remain forbidden. Shell syntax is never treated as proof of arbitrary code
-being harmless. Empty H0 and a
-nonempty library with no relevant entries both permit `selected: []`; neither
-permits skipping the reader/selector. Missing method evidence blocks completion
-without deleting or changing the original verifier's score. Unknown cost stays
-null/pending and does not justify rerunning a scored task. The audit emits only
-selection ids/hashes/byte counts and original public cell metrics, never test
-answers or per-item error feedback for learning. This cooperative trace audit
-is not a sandbox against obfuscated arbitrary code.
+Method revision `2026.10.22.2` exports exactly one runtime file: `SKILL.md`.
+It contains the fixed Reader, canonical inline metadata and every complete
+compiled general/topic procedure. There is no external index, selector, entry
+file, runtime shortlist or `max_entries` setting. Private compilation still
+uses the same general/topic slot limits. The complete UTF-8 file, including
+Reader, metadata and all procedure text, must fit the fixed **16000 UTF-8 byte**
+budget. GDPevo preparation, freeze and injection acceptance reject any other
+`max_bytes`, even when both States agree or native output capacity is enlarged.
+No line may exceed native read_file's 2000 UTF-16 unit limit. Oversize drafts
+must be revised before sealing; they are never truncated at injection time.
+
+The audit checks the original test Session's complete `SKILL.md` observation.
+Exact native read_file pages may be combined in actual observation order;
+a separate foreground single-file cat whose stdout equals all frozen bytes
+also proves a full read. Before the last necessary observation, only public
+input/statement/environment-document reads and the bounded inspection grammar
+are allowed; business tools, HTTP commands, arbitrary code, nonpublic reads and
+answer writes are rejected. A parallel business call issued before the read
+output arrives is too early. Empty H0 still requires the complete fixed file.
+All five trials bind the same frozen raw Skill SHA and bytes, while the original
+State, trial, model, scoring, timing and cost checks remain unchanged.
+
+Each of the five training Solvers must likewise observe the complete cold H0
+file before task actions. Capture and compilation independently repeat that
+check against the hash-bound training profile and original trace. The test
+auditor explicitly uses the reviewed method's `scripts/inspection.py` grammar;
+training additionally permits only that task's granted public files and input
+directory before the H0 read, not other members or private feedback.
+
+The `evo-injection-matrix-v2` receipt has `injection_mode: full_skill` and a
+raw `skill_sha256`/`skill_bytes` at matrix and cell level; cells also report the
+number of compiled entries and complete-read observation position. This raw
+file SHA is distinct from the existing package file-map fingerprint. Missing
+method evidence blocks completion without deleting or changing verifier scores.
+Unknown cost stays null/pending and does not justify another trial. Receipts
+contain metadata and original cell metrics, never answers or private feedback.
+This cooperative trace audit is not a sandbox against obfuscated arbitrary code.
+
+The offline revision 12 audit policy additionally accepts a bare stdin `sort`
+immediately after literal public file-name enumeration, for example
+`find /app/input -type f | sort`. The preceding `find` must have exactly one
+canonical root in the task workspace's `input` directory, explicitly use
+`-type f`, and use only the existing type/depth/name/print predicates, without
+repeated predicates or `-print0`; optional `-print` must be last, after all filters.
+Quoted literal names and normalized relative
+paths are supported; parent traversal remains forbidden. The existing bounded
+stdin `head` can follow the sort. Every command in a combination must still
+pass its own inspection rule. No sort options, operand files, output redirects,
+arbitrary program, or content stream (including `cat` or `head`) feeding sort
+is accepted. Only the existing literal stderr suppression to `/dev/null` is
+allowed. Directory enumeration output is filename discovery, never proof of
+a complete Skill read. Full-file observation ordering, exact bytes and the
+whole-file budget remain required.
+
+This is an explicit audit-policy expansion. Frozen revision `2026.10.21.11`
+allowed only six inspection programs and only a bounded stdin `head` as a pipe
+sink, so it did **not** permit `find /app/input -type f | sort`. Its recorded
+ERP method failure remains unchanged. Any offline re-audit must name the new
+validator/source hash and retain the original verdict; it is neither a new
+experiment nor a retrospective claim that the old execution obeyed every
+frozen instruction. This change does not authorize deployment, paid calls or
+retries, and does not change tasks, scores or learned guidance.
+
 H0-equivalent compilation runs the H0 matrix after training and freezing, then
 reuses it with an explicit reuse label; there is no second measurement or
 claimed improvement.
 Both empty and nonempty packages must pass `verify-freeze`, which repeats the
 complete export audit and compares native snapshots and the live Target.
-Only the learned slot and its native version may differ; the reader, selector
-and selection budgets stay fixed. A legal empty batch still needs all five
+Only the learned slot and its native version may differ; the fixed Reader
+and whole-Skill byte budget stay identical between H0 and final. A legal empty batch still needs all five
 Solver contexts and one Evolver with `[]` before compilation/export/sealing.
 
 For an installed guarded Evo group-training profile, the adapter submits the
@@ -267,7 +315,12 @@ node experiments/gdpevo/evo-harness/v1/test_native_runtime.mjs \
 
 It executes the method's documented field-only configuration recipe against a
 fresh native State, transports it through the real tar format and loads a native
-Session with network/model traps. A synthetic 16000-byte procedure demonstrates
-that the old native 16000-character output cap truncates its selector receipt,
-while the frozen 104192-character cap preserves it in full. This changes only
-output transport capacity; the learned-guidance budget remains 16000 bytes.
+Session with network/model traps. A synthetic complete 16000-byte Skill is read
+through actual native read_file and foreground cat, proving its full observation
+and unchanged State across transport. The retained 104192-character command
+output cap is conservative; the whole Skill budget remains 16000 UTF-8 bytes.
+For offline checks against existing compiled dependencies, set
+`EVO_NATIVE_CHECKOUT` to that built checkout and pass the new method source
+checkout as the first argument. This does not substitute the new method source
+or install dependencies. Python controller fixtures use the same explicit
+variable solely to resolve the existing native YAML parser dependency.
