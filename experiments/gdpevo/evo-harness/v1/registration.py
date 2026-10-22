@@ -155,6 +155,8 @@ def _files(config, checked, phase):
         launch = {"schema": "evo-harbor-launch-v1", "task_id": task_id, "case_id": case_id,
                   "cwd": deploy["benchmark_checkout"], "environment": {"PYTHONPATH": adapter["python_path"],
                   "PATH_prefix": deploy["bin_dir"]}, "argv_template": argv, "runtime": runtime,
+                  "state_archive_template": str(Path(deploy["penguin_home"]) / deploy["project_id"] /
+                      "benchmarks" / benchmark_id / ".jobs" / "<unique-job-name>.agent-state.tar.gz"),
                   "bundle_sha256": config["bundle_sha256"], "penguin_commit": config["versions"]["penguin_commit"],
                   "task_toml_sha256": task["task_toml_sha256"], "solving_timeout_sec": task["solving_timeout_sec"]}
         statement = f"""# Evo-Harness GDPevo {config['group']} / {task_id}
@@ -174,11 +176,15 @@ as instructed by evaluation.md; never run a stock Agent or omit the archive.
 Use the exact case-sensitive `test_agent_id` from the native worker request and
 its `STATE = App Data Dir/agents/<test_agent_id>/agent_state` path from evaluation.md.
 Do not lowercase or hand-invent another Agent directory; confirm that exact
-`STATE/system_config.yaml` exists before packing it. Choose one complete absolute
-archive path under this Benchmark's `.jobs` once; use that exact value for both
+`STATE/system_config.yaml` exists before packing it. For each launch attempt,
+choose its unused job name first, then substitute that exact case-sensitive name
+in `harbor-launch.json`'s `state_archive_template`; use that exact value for both
 `tar -czf` and `agent_state_tar`, preserving case. Confirm the archive is a regular
-file before Harbor starts. Do not reconstruct or normalize its path from the
-case ID, job name or a returned trial-directory name.
+file before Harbor starts. Do not normalize either path, derive it from a returned
+trial-directory name, or rename a job after launch. A retry authorized by the
+unchanged native pre-start policy needs a new job and its own matching archive,
+packed from the same frozen State. Retain the earlier command, failure and
+no-Target-start evidence; do not reuse the previous attempt's archive path.
 The launch already includes all `--ak` options, including Node and bundle pins;
 do not insert duplicates or use adapter defaults. Confirm the model-host helper
 agrees with the frozen allowed host. Credentials stay in private configuration.

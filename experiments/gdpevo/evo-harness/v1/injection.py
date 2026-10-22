@@ -137,8 +137,12 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
     require(not original_config["extra_instruction_paths"] and not original_config["extra_instructions"]
             and original_config["source_trial"] is None, "trial substituted instructions or prior results")
     archive = Path(actual_options["agent_state_tar"])
+    archive_template = str(Path(req["benchmark"]) / ".jobs" / "<unique-job-name>.agent-state.tar.gz")
+    require(launch.get("state_archive_template") == archive_template,
+            "registered State archive template differs from native attempt binding")
     require(archive.is_absolute() and archive.parent == Path(req["benchmark"]) / ".jobs"
-            and archive.name == trial.parent.name + ".agent-state.tar.gz", "trial did not use its own native State archive")
+            and str(archive) == archive_template.replace("<unique-job-name>", trial.parent.name),
+            "trial did not use its own native State archive")
     info = result["agent_info"]
     require(info["name"] == "penguin" and info["model_info"] == {
         "name": runtime["model_id"], "provider": runtime["provider"]}, "actual agent identity differs")
@@ -242,6 +246,8 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
         require(call.get("name") == "exec_command", "task action occurred before complete Skill observation")
         inspection._readonly_commands(call, meta["workspace"], slot, skill_files=set(skill_files))
     return {"case_id": cell["case_id"], "run": cell["run"], "trial": str(trial),
+            "job": trial.parent.name, "state_archive": str(archive),
+            "installed_state_filemap_sha256": digest(evo.encoded(expected)),
             "session_id": cell["session_id"], "native_session_id": metadata["session_id"],
             "skill_sha256": package["sha256"], "skill_bytes": sum(map(len, all_files.values())),
             "loading_policy": "official-cl-context-body-general-description",

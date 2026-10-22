@@ -168,12 +168,10 @@ def prepare_trainer(req):
 def pack_state(req):
     evo = helper(req["evo_tool"])
     root = Path(req["state"])
-    files = evo.filemap(root)
+    files = helper(Path(__file__).with_name("acceptance.py")).transported_filemap(root, evo)
     require(not Path(req["output"]).exists(), "archive already exists")
     with tarfile.open(req["output"], "w:gz") as archive:
         for name in files:
-            if name == ".vault.toml" or name.startswith(("memory/", "schedule/")):
-                continue
             archive.add(root / name, arcname=name, recursive=False)
     return {"sha256": sha(req["output"]), "archive": req["output"]}
 

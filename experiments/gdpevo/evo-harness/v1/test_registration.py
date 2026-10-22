@@ -161,7 +161,11 @@ class RegistrationTests(unittest.TestCase):
                 self.assertIn("Do not lowercase", statement)
                 self.assertIn("use that exact value for both", statement)
                 self.assertIn("file before Harbor starts", statement)
+                self.assertIn("For each launch attempt", statement)
+                self.assertIn("do not reuse the previous attempt's archive path", statement)
                 launch = protocol.read(root / case / "statement/harbor-launch.json")
+                self.assertEqual(launch["state_archive_template"],
+                    str(root / ".jobs" / "<unique-job-name>.agent-state.tar.gz"))
                 argv = launch["argv_template"]
                 options = [argv[n + 1] for n, item in enumerate(argv) if item == "--ak"]
                 self.assertIn("node_version=24.20.0", options)

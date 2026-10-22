@@ -1,15 +1,67 @@
 """Synthetic full-provenance freeze tests; no real benchmark answers or models."""
 import io
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import tarfile
+import tempfile
 import unittest
 from unittest.mock import Mock
 
 import acceptance
 import protocol
 import test_protocol
+
+
+class SnapshotTransportScopeTests(unittest.TestCase):
+    def test_documented_snapshot_transport_and_native_inventory_have_identical_scope(self):
+        evo = protocol.helper(os.environ["EVO_TOOL"])
+        method = Path(os.environ["EVO_TOOL"]).resolve().parent.parent
+        docs = (method / "references/state.md").read_text()
+        command = re.search(r"(?m)^tar .*snapshots/v<N>\.tar\.gz\.tmp agent_state$", docs)[0]
+        with tempfile.TemporaryDirectory(prefix="synthetic-snapshot-scope-") as temporary:
+            root = Path(temporary)
+            state = root / "agent_state"
+            expected = {"system_config.yaml": b"version: 1\n", "AGENTS.md": b"SYNTHETIC instructions\n",
+                        "skills/example/SKILL.md": b"SYNTHETIC retained method\n",
+                        "skills/example/memory/conditions.md": b"SYNTHETIC retained applicability\n",
+                        "skills/example/schedule": b"SYNTHETIC retained nested filename\n"}
+            excluded = {".vault.toml": b"SYNTHETIC NO SECRET\n", "memory/user/MEMORY.md": b"runtime scaffold\n",
+                        "schedule/entries.json": b"[]\n"}
+            for name, body in {**expected, **excluded}.items():
+                path = state / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(body)
+            (root / "snapshots").mkdir()
+            subprocess.run(command.replace("<N>", "1"), shell=True, cwd=root, check=True)
+            snapshot = acceptance.snapshot(root / "snapshots/v1.tar.gz.tmp")["files"]
+            self.assertEqual(snapshot, expected)
+            transport = root / "transport.tar.gz"
+            subprocess.run(["tar", "--exclude=./.vault.toml", "--exclude=./memory", "--exclude=./schedule",
+                            "-czf", str(transport), "-C", str(state), "."], check=True)
+            with tarfile.open(transport) as archive:
+                self.assertEqual({m.name.removeprefix("./"): archive.extractfile(m).read()
+                                  for m in archive if m.isfile()}, expected)
+            hashes = {name: acceptance.sha(body) for name, body in expected.items()}
+            self.assertEqual(acceptance.transported_filemap(state, evo), hashes)
+            packed = root / "packed.tar.gz"
+            protocol.pack_state({"evo_tool": os.environ["EVO_TOOL"], "state": str(state), "output": str(packed)})
+            with tarfile.open(packed) as archive:
+                self.assertEqual({m.name: archive.extractfile(m).read() for m in archive if m.isfile()}, expected)
+            helper = Path(__file__).resolve().parents[4] / "agents/penguin_agent/helper.mjs"
+            native = json.loads(subprocess.check_output(["node", str(helper), "state-files", str(state)], text=True))
+            self.assertEqual(native["files"], hashes)
+            # No retrospective normalization of old vault-only snapshots.
+            legacy = root / "old-unfiltered.tar.gz"
+            with tarfile.open(legacy, "w:gz") as archive:
+                archive.add(state, arcname="agent_state")
+            before = legacy.read_bytes()
+            with self.assertRaisesRegex(ValueError, "excluded transport material"):
+                acceptance.snapshot(legacy)
+            self.assertEqual(legacy.read_bytes(), before)
 
 
 class FreezeTests(unittest.TestCase):
@@ -213,10 +265,13 @@ class FreezeTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("SYNTHETIC forbidden State change\n")
                 self.pack(self.final, self.final_archive)
-                with self.assertRaisesRegex(ValueError, "outside learned slot"):
+                expected = "excluded transport material" if filename.startswith("memory/") else "outside learned slot"
+                with self.assertRaisesRegex(ValueError, expected):
                     self.verify()
                 if before is None:
                     path.unlink()
+                    if filename.startswith("memory/"):
+                        path.parent.rmdir()  # Do not mask the following config-change assertion with an excluded root.
                 else:
                     path.write_bytes(before)
         config = self.final / "system_config.yaml"

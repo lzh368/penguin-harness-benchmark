@@ -420,3 +420,20 @@ and the fixed public JSON display loop are preparation operations. Business
 APIs and writes still require all required Skill observations first. These
 are recorded protocol extensions, not retroactive passes for .6/.7 evidence.
 Old018's business call before both topic observations remains invalid.
+
+
+R19 offline engineering follow-up (not deployed): each registered launch now
+records its exact `state_archive_template`. Every authorized pre-start retry
+chooses a new job and matching `<job>.agent-state.tar.gz` archive from the same
+frozen State. The original own-job archive assertion remains enforced; neither
+renaming a started job nor reusing an earlier attempt's archive path satisfies
+it. This metadata does not authorize retries, and score/State/trace validation
+is unchanged. Original runs and audit verdicts are never overwritten.
+
+Snapshot examples, State packing, live freeze comparison and the native container
+inventory now share the top-level transport exclusions `.vault.toml`, `memory`
+and `schedule`. All retained configuration and Skill bytes remain exact; nested
+Skill files with those names are retained. A snapshot containing excluded roots
+is rejected explicitly, not silently filtered or repaired. The live State
+comparison ignores only the native runtime roots omitted from transport. This
+is a new acceptance scope, not a claim that an old unfiltered snapshot passed.

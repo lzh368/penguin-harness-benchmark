@@ -152,6 +152,35 @@ class InjectionTests(unittest.TestCase):
     def skill_raw(self):
         return self.frozen[acceptance.SLOT + "/SKILL.md"]
 
+    def test_each_prestart_retry_binds_new_job_and_matching_archive(self):
+        trial, _ = self.trials[0]
+        old_archive = protocol.read(trial / "result.json")["config"]["agent"]["kwargs"]["agent_state_tar"]
+        retry_job = trial.parent.with_name("synthetic-authorized-prestart-retry")
+        retry_job.mkdir()
+        retried_trial = retry_job / trial.name
+        shutil.move(trial, retried_trial)
+        # Models only the successful second trial after an independently
+        # authorized pre-start repair, not permission to execute/retest.
+        with self.assertRaisesRegex(ValueError, "own native State archive"):
+            protocol.execute(self.req)
+        raw = protocol.read(retried_trial / "result.json")
+        new_archive = str(retry_job.with_name(retry_job.name + ".agent-state.tar.gz"))
+        raw["config"]["agent"]["kwargs"]["agent_state_tar"] = new_archive
+        save(retried_trial / "result.json", raw)
+        checked = protocol.execute(self.req)
+        self.assertEqual(checked["cells"][0]["job"], retry_job.name)
+        self.assertEqual(checked["cells"][0]["state_archive"], new_archive)
+        self.assertNotEqual(old_archive, new_archive)
+        self.assertEqual(checked["cells"][0]["installed_state_filemap_sha256"],
+            injection.digest(self.evo.encoded({name: injection.digest(body) for name, body in self.frozen.items()})))
+        # A correctly named archive cannot excuse another installed State.
+        ready = retried_trial / "agent/penguin-agent-state-ready.json"
+        record = protocol.read(ready)
+        record["files"]["AGENTS.md"] = "0" * 64
+        save(ready, record)
+        with self.assertRaisesRegex(ValueError, "changed during native startup"):
+            protocol.execute(self.req)
+
     def test_018_ordinary_preparation_and_native_instructions_are_not_business(self):
         original = self.trace_rows()
         state = original[0]["payload"]["agent_state"]
@@ -342,18 +371,22 @@ class InjectionTests(unittest.TestCase):
                 self.save_rows(rows)
                 self.assertTrue(protocol.execute(self.req)["complete"])
 
-    def test_readonly_discovery_and_final_cat_prove_complete_observation(self):
+    def test_readonly_discovery_and_cat_prove_complete_observation(self):
         original = self.trace_rows()
         target = json.loads(original[2]["payload"]["arguments"])["file_path"]
         state = original[0]["payload"]["agent_state"]
-        commands = ["ls -la /app/input/payloads/ && cat " + target,
-                    "ls " + state + "/skills && echo '---' && cat " + target,
-                    "pwd && ls /app/input && echo '---' && cat -- " + target]
-        for command in commands:
+        raw = self.skill_raw().decode()
+        prefix = "/app\nevo-harness-learned\n---\n"
+        commands = [("ls -la /app/input/payloads/ && cat " + target, prefix + raw),
+                    ("ls " + state + "/skills && echo '---' && cat " + target, prefix + raw),
+                    ("pwd && ls /app/input && echo '---' && cat -- " + target, prefix + raw),
+                    ("ls /app/input && cat " + target + ";", "public-file.json\n" + raw),
+                    ("cat " + target + "; echo ---", raw + "---\n")]
+        for command, stdout in commands:
             with self.subTest(command=command):
                 rows = copy.deepcopy(original)
                 rows[2]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": command}))
-                rows[3]["payload"]["output"] = "/app\nevo-harness-learned\n---\n" + self.skill_raw().decode()
+                rows[3]["payload"]["output"] = stdout
                 self.save_rows(rows)
                 accepted = protocol.execute(self.req)
                 self.assertTrue(accepted["complete"])
@@ -367,7 +400,7 @@ class InjectionTests(unittest.TestCase):
         self.save_rows(rows)
         self.assertTrue(protocol.execute(self.req)["complete"])
 
-    def test_combined_read_needs_exact_unique_tail_and_no_earlier_business(self):
+    def test_combined_read_needs_exact_unique_content_and_no_earlier_business(self):
         original = self.trace_rows()
         target = json.loads(original[2]["payload"]["arguments"])["file_path"]
         raw = self.skill_raw().decode()
@@ -377,7 +410,6 @@ class InjectionTests(unittest.TestCase):
                                 ("cat /app/instruction.md && cat " + target, "public\n" + raw),
                                 ("ls /app/input | cat " + target, raw),
                                 ("ls /app/input || cat " + target, raw),
-                                ("ls /app/input && cat " + target + ";", raw),
                                 ("ls /app/input && cat " + target + " 2>/dev/null", raw),
                                 ("echo 'pretend Skill text' && cat " + target, raw)):
             with self.subTest(command=command):
@@ -440,12 +472,12 @@ class InjectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
                     protocol.execute(self.req)
 
-    def test_cat_read_requires_exact_stdout_and_single_unmodified_command(self):
+    def test_cat_read_requires_exact_bytes_and_supported_readonly_syntax(self):
         original = self.trace_rows()
         target = json.loads(original[2]["payload"]["arguments"])["file_path"]
         raw = self.skill_raw().decode()
         for command, output in (("cat " + target, raw[:-1]), ("cat " + target, raw + " "),
-                                ("cat " + target + "; echo ---", raw), ("head -c 99999 " + target, raw),
+                                ("head -c 99999 " + target, raw),
                                 ("cat " + target + " | head -99999", raw), ("cat " + target + " 2>/dev/null", raw)):
             with self.subTest(command=command, length=len(output)):
                 rows = copy.deepcopy(original)

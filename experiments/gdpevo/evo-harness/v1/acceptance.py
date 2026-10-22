@@ -10,6 +10,7 @@ import tempfile
 SLOT = "skills/evo-harness-learned"
 METHOD_PREFIX = "skills/evo-method-"
 FULL_SKILL_MAX_BYTES = 16000
+TRANSPORT_EXCLUDES = frozenset((".vault.toml", "memory", "schedule"))
 
 
 def require(condition, message):
@@ -87,6 +88,27 @@ def snapshot(path):
         raise ValueError("invalid native snapshot archive") from exc
 
 
+def transported_filemap(root, evo):
+    """The same top-level exclusions as native State transport/state-files.
+
+    Keep the generic Evo filemap strict for learning evidence and packages.
+    Native memory/schedule scaffolding is not part of a frozen test payload.
+    """
+    root = Path(root)
+    require(root.is_dir() and not root.is_symlink(), "invalid Target State")
+    files = {}
+    for path in sorted(root.iterdir()):
+        if path.name in TRANSPORT_EXCLUDES:
+            continue
+        require(not path.is_symlink(), "linked Target State entry")
+        if path.is_dir():
+            files.update({path.name + "/" + name: value for name, value in evo.filemap(path).items()})
+        else:
+            require(path.is_file(), "non-regular Target State entry")
+            files[path.name] = sha(path.read_bytes())
+    return files
+
+
 def _snapshot(path):
     path = Path(path)
     require(path.is_file() and not path.is_symlink(), "snapshot must be a regular native archive")
@@ -99,6 +121,8 @@ def _snapshot(path):
             require(parts[0] == "agent_state" and all(p not in ("", ".", "..") for p in parts)
                     and "\\" not in name and "\x00" not in name,
                     "snapshot path must stay under agent_state without aliases")
+            require(len(parts) == 1 or parts[1] not in TRANSPORT_EXCLUDES,
+                    "native snapshot contains excluded transport material")
             require(name not in entries, "duplicate snapshot entry")
             require(member.isdir() or member.type in (tarfile.REGTYPE, tarfile.AREGTYPE),
                     "snapshot links and non-regular entries are forbidden")
@@ -214,7 +238,7 @@ def verify_freeze(req, verify_export, evo):
         state["filemap"] = {name: sha(raw) for name, raw in sorted(state.pop("files").items())}
         state["filemap_sha256"] = sha(evo.encoded(state["filemap"]))
         state["version"] = version
-    target_files = evo.filemap(req["target_state"])
+    target_files = transported_filemap(req["target_state"], evo)
     require(target_files == (h0 if active == "h0" else final)["filemap"],
             "live Target State differs from active frozen snapshot")
     return {"schema": "evo-freeze-verification-v1", "complete": True, "equivalent_h0": equivalent,
