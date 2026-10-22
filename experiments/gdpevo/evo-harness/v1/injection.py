@@ -21,7 +21,7 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _native_read(pairs, path, raw, workspace, slot, inspection):
+def _native_read(pairs, path, raw, workspace, slot, inspection, skill_files=None):
     lines, observed = raw.decode().split("\n"), {}
     if lines[-1] == "":
         lines.pop()
@@ -35,7 +35,7 @@ def _native_read(pairs, path, raw, workspace, slot, inspection):
             continue
         if call.get("name") == "exec_command":
             try:
-                commands, workdir, redirects, _ = inspection._readonly_commands(call, workspace, slot)
+                commands, workdir, redirects, _ = inspection._readonly_commands(call, workspace, slot, skill_files=skill_files)
             except (ValueError, TypeError, KeyError):
                 continue
             argv = commands[0]["argv"]
@@ -61,6 +61,41 @@ def _native_read(pairs, path, raw, workspace, slot, inspection):
     require(last >= 0, "frozen Skill not fully observed through native read_file or exact foreground cat")
     return last
 
+
+
+def loading_files(frozen, evo, acceptance):
+    files = evo.package_state_files(acceptance.package_files_from_state(frozen, evo))
+    reader = evo.parse_reader(files[acceptance.SLOT + "/SKILL.md"])
+    required = {acceptance.SLOT + "/SKILL.md", *(entry["state_path"] for entry in reader["entries"]
+                                                if entry["load_mode"] == "body")}
+    forbidden = {entry["state_path"] for entry in reader["entries"] if entry["load_mode"] == "description"}
+    return files, {path: files[path] for path in sorted(required)}, forbidden
+
+
+def reject_general_body_reads(pairs, forbidden, workspace, inspection):
+    """General descriptions are already in the Reader; no Agent file read adds bodies.
+
+    Reuse the existing literal command grammar for actual cat/head operations,
+    not substring matching of documentation or echoed paths. The cooperative
+    trace policy does not claim to sandbox obfuscated arbitrary programs.
+    """
+    for call, _ in pairs:
+        if call.get("name") == "read_file":
+            args = json.loads(call["arguments"])
+            require(inspection._path(args.get("file_path"), workspace) not in forbidden,
+                    "general Skill body read violates description-only loading")
+        elif call.get("name") == "exec_command":
+            try:
+                commands, workdir, _ = inspection._shell_commands(call, workspace)
+            except (ValueError, TypeError, KeyError):
+                continue
+            for command in commands:
+                argv = command["argv"]
+                if argv[0] not in ("cat", "head"):
+                    continue
+                paths = [inspection._path(value, workdir) for value in inspection._file_operands(argv)]
+                require(not forbidden.intersection(paths),
+                        "general Skill body read violates description-only loading")
 
 def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
     inspection = evo.inspection  # Explicitly loaded from this reviewed method source.
@@ -189,9 +224,14 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
     require(requests > 0 and set(calls) == set(outputs), "incomplete native request/action/observation pairing")
     pairs = [(call, outputs[key]) for key, call in calls.items()]
     slot = state + "/skills/evo-harness-learned"
-    skill_raw = frozen[acceptance.SLOT + "/SKILL.md"]
-    skill = evo.parse_skill(skill_raw)
-    read_observed = _native_read(pairs, slot + "/SKILL.md", skill_raw, meta["workspace"], slot, inspection)
+    package = acceptance.package_from_snapshot(frozen, evo)
+    all_files, required_files, forbidden_files = loading_files(frozen, evo, acceptance)
+    skill_files = {state + "/" + name: raw for name, raw in required_files.items()}
+    forbidden = {state + "/" + name for name in forbidden_files}
+    reject_general_body_reads(pairs, forbidden, meta["workspace"], inspection)
+    observed = {path: _native_read(pairs, path, raw, meta["workspace"], slot, inspection,
+                                 skill_files=set(skill_files)) for path, raw in skill_files.items()}
+    read_observed = max(observed.values())
     # Read-only public inspection may precede the full Skill. Any business tool
     # call, answer write or nonpublic file read must follow its actual complete
     # observation, including when calls were issued concurrently.
@@ -201,15 +241,20 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
         if call.get("name") == "read_file":
             args = json.loads(call["arguments"])
             path = inspection._path(args.get("file_path"), meta["workspace"])
-            require(path == slot + "/SKILL.md" or inspection._public_file(path, meta["workspace"]),
+            require(path in skill_files or inspection._public_file(path, meta["workspace"]),
                     "nonpublic read preceded the complete Skill observation")
             continue
         require(call.get("name") == "exec_command", "task action occurred before complete Skill observation")
-        inspection._readonly_commands(call, meta["workspace"], slot)
+        inspection._readonly_commands(call, meta["workspace"], slot, skill_files=set(skill_files))
     return {"case_id": cell["case_id"], "run": cell["run"], "trial": str(trial),
             "session_id": cell["session_id"], "native_session_id": metadata["session_id"],
-            "skill_sha256": digest(skill_raw), "skill_bytes": len(skill_raw),
-            "entries": len(skill["entries"]), "read_observed_position": read_observed,
+            "skill_sha256": package["sha256"], "skill_bytes": sum(map(len, all_files.values())),
+            "loading_policy": "official-cl-context-body-general-description",
+            "skill_files": {name: digest(raw) for name, raw in all_files.items()},
+            "loaded_skill_files": {name: digest(raw) for name, raw in required_files.items()},
+            "loaded_skill_bytes": sum(map(len, required_files.values())),
+            "entries": package["entries"], "read_observed_position": read_observed,
+            "file_read_observed_positions": {name.removeprefix(state + "/"): position for name, position in observed.items()},
             "trace_sha256": hashes,
             "score": round(reward * 100, 2), "cost_status": metadata.get("cost_status", "unknown"),
             "cost": actual_cost, "duration_ms": round(duration)}
@@ -231,10 +276,9 @@ def verify_matrix(req, matrix, acceptance, evo, registration, validate_config):
             and matrix_req["identity"]["expected_version"] == req["expected_version"], "injection matrix identity mismatch")
     frozen = acceptance.snapshot(req["snapshot"])["files"]
     require(acceptance.config_version(frozen["system_config.yaml"])[0] == req["expected_version"], "injection snapshot version mismatch")
-    acceptance.package_from_snapshot(frozen, evo)
-    skill_raw = frozen[acceptance.SLOT + "/SKILL.md"]
-    skill = evo.parse_skill(skill_raw)
-    acceptance.verify_output_budget(frozen["system_config.yaml"], skill["max_bytes"])
+    package = acceptance.package_from_snapshot(frozen, evo)
+    skill_files, required_files, _ = loading_files(frozen, evo, acceptance)
+    acceptance.verify_output_budget(frozen["system_config.yaml"], package["max_bytes"])
     jobs = Path(req["benchmark"]) / ".jobs"
     require(jobs.is_dir() and not jobs.is_symlink(), "native Benchmark jobs missing")
     trials = {}
@@ -252,7 +296,11 @@ def verify_matrix(req, matrix, acceptance, evo, registration, validate_config):
         launch = read(Path(req["benchmark"]) / cell["case_id"] / "statement/harbor-launch.json")
         require(launch["task_id"] == registered["test"]["case_to_task"][cell["case_id"]], "registered task mapping changed")
         receipts.append(_trial(trials[name][0], cell, frozen, req, evo, acceptance, launch, config))
-    return {"schema": "evo-injection-matrix-v2", "injection_mode": "full_skill",
-            "skill_sha256": digest(skill_raw), "skill_bytes": len(skill_raw),
+    return {"schema": "evo-injection-matrix-v3", "injection_mode": "full_skill",
+            "skill_sha256": package["sha256"], "skill_bytes": sum(map(len, skill_files.values())),
+            "skill_files": {name: digest(raw) for name, raw in skill_files.items()},
+            "loading_policy": "official-cl-context-body-general-description",
+            "loaded_skill_files": {name: digest(raw) for name, raw in required_files.items()},
+            "loaded_skill_bytes": sum(map(len, required_files.values())),
             "complete": True, "cells": receipts,
             "runtime": req["runtime"], "snapshot_sha256": digest(Path(req["snapshot"]).read_bytes()), "model_calls": 0}

@@ -214,51 +214,70 @@ An unnecessary native PUT can reserialize equivalent YAML, so it is not used
 as a readiness check. All three complete State maps must equal the frozen
 snapshot; there is no blanket startup-rewrite exemption. Vault, memory and
 schedules are not read or retained by this inventory.
-Method revision `2026.10.22.5` exports exactly one runtime file: `SKILL.md`.
-It contains the fixed Reader, canonical inline metadata and every complete
-compiled general/topic procedure. There is no external index, selector, entry
-file, runtime shortlist or `max_entries` setting. Private compilation still
-uses the same general/topic slot limits. The complete UTF-8 file, including
-Reader, metadata and all procedure text, must fit the fixed **16000 UTF-8 byte**
-budget. GDPevo preparation, freeze and injection acceptance reject any other
-`max_bytes`, even when both States agree or native output capacity is enlarged.
-No line may exceed native read_file's 2000 UTF-16 unit limit. Oversize drafts
-must be revised before sealing; they are never truncated at injection time.
+Method revision `2026.10.22.6` exports a fixed Reader/manifest at `SKILL.md`
+and one complete procedure per `methods/evo-method-<identity>/SKILL.md`.
+For native State installation, the manifest-bound mapper puts the Reader at
+`skills/evo-harness-learned/SKILL.md` and every method at its own sibling
+`skills/evo-method-<identity>/SKILL.md`. This matters because the native loader
+recognizes only first-level Skill directories. General/topic identity, evidence
+conditions and complete procedure bodies are retained in the package; runtime
+loading follows the official CL distinction below. No selector, shortlist
+or runtime `max_entries` is introduced. Private compilation keeps the same
+ADD/MERGE/REVISE/SKIP operations and general/topic slot limits.
+
+The complete package — Reader, manifest, method metadata and all bodies — must
+fit **16000 UTF-8 bytes**. Preparation, freeze and injection acceptance reject
+any other `max_bytes`; enlarging native output capacity does not change this
+budget. No line may exceed native read_file's 2000 UTF-16 unit limit. Oversize
+drafts must be revised before sealing and are never truncated during injection.
 
 The reference CL path at official commit
 `3c7c7b8c62a3f07da1d4407aa03f0ca079954bcf` continues the original Solver's
 message history and model for feedback-based proposals. It loads every current
 context skill body, but only general skill descriptions; its defined
 `_select_skills` is not called on that path. The paper's budgeted Select is a
-separate description. Loading the full current group follows the implementation;
-putting every compiled procedure, including general bodies, in one `SKILL.md`
-is this GDPevo experiment's explicit organization choice.
+separate description. Runtime loading follows that distinction: every current-group topic body and
+every general description are observed, with no per-task selector or other-group
+skills. General descriptions are explicit Evolver outputs preserved in the Reader
+and native metadata; general bodies are retained for provenance but are not read
+by the doing-task Agent. Do not relabel general rules as topic to force injection,
+or hide full general procedures inside their descriptions. Independent native
+Skill packaging is this GDPevo adaptation, not a claim of identical storage layout.
 
-The audit checks the original test Session's complete `SKILL.md` observation.
-Exact native read_file pages may be combined in actual observation order;
-a separate foreground single-file cat whose stdout equals all frozen bytes
-also proves a full read. Before the last necessary observation, only public
+The audit requires the original test Session to observe the entire Reader and
+every topic method before business actions. The Reader carries all general
+descriptions and an explicit `load_mode` for each entry. Native read_file pages
+may be combined in actual observation order; a foreground single-file cat whose
+stdout equals that file's frozen bytes also proves a complete file read. Missing
+or truncated pages must be read before proceeding. The manifest, native Skill
+metadata and a topic method's title do not substitute for its body. General
+body reads via native read_file or literal cat/head are rejected at every point,
+including after the required observations are complete. Only public
 input/statement/environment-document reads and the bounded inspection grammar
-are allowed; business tools, HTTP commands, arbitrary code, nonpublic reads and
-answer writes are rejected. A parallel business call issued before the read
-output arrives is too early. Empty H0 still requires the complete fixed file.
-All five trials bind the same frozen raw Skill SHA and bytes, while the original
-State, trial, model, scoring, timing and cost checks remain unchanged.
+may precede full-package observation. Concurrent business calls issued before
+the final required observation are rejected. Empty H0 still reads its complete
+fixed Reader. All five trials bind the same frozen package, State file map and required
+loading set (Reader plus all topic files).
 
-Each of the five training Solvers must likewise observe the complete cold H0
-file before task actions. Capture and compilation independently repeat that
-check against the hash-bound training profile and original trace. The test
-auditor explicitly uses the reviewed method's `scripts/inspection.py` grammar;
-training additionally permits only that task's granted public files and input
-directory before the H0 read, not other members or private feedback.
+Each training Solver likewise reads the complete cold H0 Reader before task
+actions. Capture and compilation repeat that check against the hash-bound
+training profile and trace. The test auditor reuses the reviewed method's
+`scripts/inspection.py` grammar, granting exact frozen sibling Skill paths;
+training still permits only that task's granted public files and input directory,
+not other members or private feedback.
 
-The `evo-injection-matrix-v2` receipt has `injection_mode: full_skill` and a
-raw `skill_sha256`/`skill_bytes` at matrix and cell level; cells also report the
-number of compiled entries and complete-read observation position. This raw
-file SHA is distinct from the existing package file-map fingerprint. Missing
-method evidence blocks completion without deleting or changing verifier scores.
-Unknown cost stays null/pending and does not justify another trial. Receipts
-contain metadata and original cell metrics, never answers or private feedback.
+The new `evo-injection-matrix-v3` receipt retains `injection_mode: full_skill`
+for loading the entire fixed official-CL set without selection. `skill_sha256` now identifies the whole
+export-package file-map fingerprint, `skill_bytes` counts the entire package,
+and `skill_files` binds each native State path to its SHA. `loaded_skill_files` and `loaded_skill_bytes` identify only the actual required
+Reader/topic set, and `loading_policy` fixes context-body/general-description.
+Cells include those same fields plus each required file's completed-read position.
+A general body's presence in the frozen file map is not an injection claim. This is a new
+schema, distinct from the previous raw single-file SHA receipt; old evidence is
+preserved under its original version. Original trial, model, scoring, timing,
+cleanup and cost checks remain unchanged. Missing method evidence blocks
+completion without changing verifier scores. Unknown cost stays null/pending
+and does not justify another trial. Receipts contain no answers or feedback.
 This cooperative trace audit is not a sandbox against obfuscated arbitrary code.
 
 The offline revision 12 audit policy additionally accepts a bare stdin `sort`

@@ -15,6 +15,22 @@ import protocol
 SYNTHETIC_OUTPUT_TOOLS = "max_turns: -1\ntools:\n  builtin:\n    - name: exec_command\n      maxOutputLength: 104192\n    - name: input_command\n      maxOutputLength: 104192\n"
 
 
+def install_package(evo, package, state):
+    """Synthetic State install follows the same manifest-bound native mapping."""
+    package, state = Path(package), Path(state)
+    evo.validate_package(package)
+    files = {name: (package / name).read_bytes() for name in evo.filemap(package)}
+    mapped = evo.package_state_files(files)
+    for path in (state / "skills").glob("*"):
+        if path.name == "evo-harness-learned" or path.name.startswith("evo-method-"):
+            shutil.rmtree(path)
+    for name, raw in mapped.items():
+        path = state / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    return mapped
+
+
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="synthetic-evo-protocol-")
@@ -148,6 +164,10 @@ class ProtocolTests(unittest.TestCase):
         skill_before, config_before = skill_file.read_bytes(), config_file.read_bytes()
         for budget in (8000, 32000):
             with self.subTest(budget=budget):
+                if budget > 16000:
+                    with self.assertRaisesRegex(ValueError, "invalid byte budget"):
+                        evo.render_skill([], budget)
+                    continue
                 skill_file.write_bytes(evo.render_skill([], budget))
                 config_file.write_bytes(config_before.replace(b"104192", b"200192"))
                 with self.assertRaisesRegex(ValueError, "exactly 16000"):
@@ -331,8 +351,13 @@ class ExportEvidenceTests(unittest.TestCase):
         self.candidate_path = self.save(self.private / "candidates.json", self.candidates)
         entry = {"id": "synthetic-join", "level": "topic", "topic": "synthetic", "trigger": "fictional join task",
                  "scope": "synthetic only", "body": "SYNTHETIC inspect documented keys; join rows; report unmatched rows."}
-        self.decisions = self.save(self.private / "decisions.json", [{"op": "ADD", "candidate_ids": [c["id"] for c in self.candidates],
-             "reason": "SYNTHETIC shared procedure", "entry": entry}] if self.candidates else [])
+        general = {"id": "synthetic-grain", "level": "general", "description": "SYNTHETIC preserve the stated record grain.", "trigger": "fictional multi-record input",
+                   "scope": "synthetic same-entity snapshots", "body": "SYNTHETIC preserve entity and observation-date keys before calculating."}
+        self.decisions = self.save(self.private / "decisions.json", [
+            {"op": "ADD", "candidate_ids": [c["id"] for c in self.candidates[:2]],
+             "reason": "SYNTHETIC preserve supported grain", "entry": general},
+            {"op": "ADD", "candidate_ids": [c["id"] for c in self.candidates[2:]],
+             "reason": "SYNTHETIC documented join procedure", "entry": entry}] if self.candidates else [])
         self.roles.append(self.role("evolver", "synthetic-evolver",
                                    [self.role_text, self.candidate_path, self.library] + [Path(p) for p in self.contexts], self.decisions))
         self.limits = {"general": 5, "topic": 5}

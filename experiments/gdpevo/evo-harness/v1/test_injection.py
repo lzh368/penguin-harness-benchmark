@@ -69,9 +69,13 @@ def write_trial(benchmark, cell, frozen, runtime):
             "arguments": json.dumps(args), "tool_call_id": key}}, {"type": "model_msg", "payload": {
             "type": "tool_call_output", "tool_call_id": key, "output": output, "stop_reason": "completed"}}])
     slot = acceptance.SLOT
-    raw = frozen[slot + "/SKILL.md"]
-    pair("skill", "read_file", {"file_path": state + "/" + slot + "/SKILL.md"},
-         "\n".join(f"{i}\t{line}" for i, line in enumerate(raw.decode().removesuffix("\n").split("\n"), 1)))
+    evo = protocol.helper(os.environ["EVO_TOOL"])
+    _, required_files, _ = injection.loading_files(frozen, evo, acceptance)
+    files = [(slot + "/SKILL.md", frozen[slot + "/SKILL.md"])] + sorted(
+        (name, raw) for name, raw in required_files.items() if name != slot + "/SKILL.md")
+    for index, (name, raw) in enumerate(files):
+        pair("skill" if index == 0 else "method-" + str(index), "read_file", {"file_path": state + "/" + name},
+             "\n".join(f"{i}\t{line}" for i, line in enumerate(raw.decode().removesuffix("\n").split("\n"), 1)))
     pair("answer", "write_file", {"file_path": "/app/submission/answer.json", "text": "{}"}, "SYNTHETIC written")
     trace = trial / "agent/penguin/traces/default_agent/root.jsonl"
     trace.parent.mkdir(parents=True)
@@ -90,11 +94,14 @@ class InjectionTests(unittest.TestCase):
             self.runtime = registration.config["runtime"]
             self.config = registration.config
             self.registered = registration.run_prepare()
-            self.library = save(self.root / "library.json", [{"id": "fixture-guide", "level": "general",
-                "trigger": "synthetic", "scope": "synthetic", "body": "SYNTHETIC validate documented join keys."}])
+            self.library = save(self.root / "library.json", [{"id": "fixture-guide", "level": "general", "description": "SYNTHETIC_GENERAL_DESCRIPTION: check join-grain applicability.",
+                "trigger": "synthetic", "scope": "synthetic", "body": "SYNTHETIC_GENERAL_BODY: validate documented join keys."},
+                {"id": "fixture-topic", "level": "topic", "topic": "synthetic", "trigger": "synthetic balance",
+                 "scope": "synthetic account snapshots", "body": "SYNTHETIC_TOPIC_BODY: preserve account and observation-date granularity."}])
             self.state = self.root / "state"
             self.evo.export_skill({"library": str(self.library), "limits": {"general": 5, "topic": 5},
                 "max_bytes": 16000, "output": str(self.state / acceptance.SLOT)})
+            test_protocol.install_package(self.evo, self.state / acceptance.SLOT, self.state)
             (self.state / "system_config.yaml").write_text("version: 1\n" + test_protocol.SYNTHETIC_OUTPUT_TOOLS)
             (self.state / "AGENTS.md").write_text("SYNTHETIC frozen reader instruction\n")
             self.snapshot = self.root / "snapshot.tar.gz"
@@ -121,6 +128,7 @@ class InjectionTests(unittest.TestCase):
             shutil.rmtree(self.state / acceptance.SLOT)
             self.evo.export_skill({"library": str(self.library), "limits": {"general": 5, "topic": 5},
                 "max_bytes": 16000, "output": str(self.state / acceptance.SLOT)})
+            test_protocol.install_package(self.evo, self.state / acceptance.SLOT, self.state)
             with tarfile.open(self.snapshot, "w:gz") as archive:
                 archive.add(self.state, arcname="agent_state")
             self.frozen = acceptance.snapshot(self.snapshot)["files"]
@@ -148,12 +156,15 @@ class InjectionTests(unittest.TestCase):
         result = protocol.execute(self.req)
         self.assertTrue(result["complete"])
         self.assertEqual(result["injection_mode"], "full_skill")
-        self.assertEqual(result["schema"], "evo-injection-matrix-v2")
-        digest = hashlib.sha256(self.skill_raw()).hexdigest()
+        self.assertEqual(result["schema"], "evo-injection-matrix-v3")
+        package = acceptance.package_from_snapshot(self.frozen, self.evo)
+        digest = package["sha256"]
+        total_bytes = sum(len(raw) for name, raw in self.frozen.items() if acceptance.learned_state_file(name))
         self.assertEqual(result["skill_sha256"], digest)
         self.assertEqual(len(result["cells"]), 5)
-        self.assertTrue(all(c["skill_sha256"] == digest and c["skill_bytes"] == len(self.skill_raw())
-                            and c["entries"] == 1 for c in result["cells"]))
+        self.assertTrue(all(c["skill_sha256"] == digest and c["skill_bytes"] == total_bytes
+                            and c["entries"] == 2
+                            and c["skill_files"] == result["skill_files"] for c in result["cells"]))
         self.assertNotIn("SYNTHETIC validate", json.dumps(result))
         self.assertNotIn("selected", json.dumps(result))
 
@@ -166,13 +177,81 @@ class InjectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
             protocol.execute(self.req)
 
-    def test_more_than_five_rules_are_all_injected_without_selection(self):
+    def test_more_than_five_entries_load_all_topic_bodies_and_general_descriptions_without_selection(self):
         self.replace_library([{"id": f"synthetic-{i}", "level": "general" if i < 4 else "topic",
-            **({"topic": "synthetic"} if i >= 4 else {}), "trigger": "synthetic", "scope": "synthetic",
+            **({"topic": "synthetic"} if i >= 4 else {"description": "SYNTHETIC reusable query applicability."}), "trigger": "synthetic", "scope": "synthetic",
             "body": "SYNTHETIC inspect documented inputs, compute the stated result."} for i in range(6)])
         result = protocol.execute(self.req)
         self.assertTrue(all(c["entries"] == 6 for c in result["cells"]))
         self.assertEqual({p.name for p in (self.state / acceptance.SLOT).iterdir()}, {"SKILL.md"})
+
+    def test_reader_manifest_does_not_replace_any_method_body(self):
+        original = self.trace_rows()
+        for key in ("method-1",):
+            with self.subTest(key=key):
+                self.save_rows([row for row in original if row.get("payload", {}).get("tool_call_id") != key])
+                with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
+                    protocol.execute(self.req)
+
+    def test_each_method_pages_must_finish_before_business_action(self):
+        original = self.trace_rows()
+        call, output = original[4:6]
+        path = json.loads(call["payload"]["arguments"])["file_path"]
+        raw = self.frozen[path.split("/agent_state/", 1)[1]]
+        lines = raw.decode().removesuffix("\n").split("\n")
+        midpoint = max(1, len(lines) // 2)
+        first, second = copy.deepcopy([call, output]), copy.deepcopy([call, output])
+        first[1]["payload"]["output"] = "\n".join(f"{i}\t{line}" for i, line in enumerate(lines[:midpoint], 1))
+        for row in second:
+            row["payload"]["tool_call_id"] = "method-second-page"
+        second[0]["payload"]["arguments"] = json.dumps({"file_path": path, "offset": midpoint + 1})
+        second[1]["payload"]["output"] = "\n".join(f"{i}\t{line}" for i, line in enumerate(lines[midpoint:], midpoint + 1))
+        self.save_rows([*original[:4], *first, *original[6:-2], *second, *original[-2:]])
+        self.assertTrue(protocol.execute(self.req)["complete"])
+        self.save_rows([*original[:4], *first, *original[6:]])
+        with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
+            protocol.execute(self.req)
+        self.save_rows([*original[:4], *first, *original[6:], *second])
+        with self.assertRaisesRegex(ValueError, "before complete Skill observation"):
+            protocol.execute(self.req)
+
+    def test_general_descriptions_present_bodies_absent_and_extra_reads_rejected(self):
+        original = self.trace_rows()
+        model_observations = "\n".join(row["payload"].get("output", "") for row in original if row["type"] == "model_msg")
+        self.assertIn("SYNTHETIC_GENERAL_DESCRIPTION", model_observations)
+        self.assertIn("SYNTHETIC_TOPIC_BODY", model_observations)
+        self.assertNotIn("SYNTHETIC_GENERAL_BODY", model_observations)
+        result = protocol.execute(self.req)
+        self.assertEqual(result["loading_policy"], "official-cl-context-body-general-description")
+        self.assertEqual(len(result["skill_files"]), 3)
+        self.assertEqual(len(result["loaded_skill_files"]), 2)
+        forbidden = set(result["skill_files"]) - set(result["loaded_skill_files"])
+        path = original[0]["payload"]["agent_state"] + "/" + next(iter(forbidden))
+        for tool, args in (("read_file", {"file_path": path}), ("exec_command", {"cmd": "cat " + path}),
+                           ("exec_command", {"cmd": "head -10 SKILL.md", "workdir": path.rsplit("/", 1)[0]})):
+            for position in (2, len(original)):
+                with self.subTest(tool=tool, position=position):
+                    extra = self.extra_pair(original, tool, args)
+                    self.save_rows([*original[:position], *extra, *original[position:]])
+                    with self.assertRaisesRegex(ValueError, "description-only"):
+                        protocol.execute(self.req)
+        # Merely mentioning a path is not an actual body read.
+        extra = self.extra_pair(original, "exec_command", {"cmd": "echo " + path})
+        self.save_rows([*original, *extra])
+        self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_foreground_method_cat_uses_exact_frozen_sibling(self):
+        rows = self.trace_rows()
+        target = json.loads(rows[4]["payload"]["arguments"])["file_path"]
+        raw = self.frozen[target.split("/agent_state/", 1)[1]]
+        rows[4]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": "cat SKILL.md", "workdir": target.rsplit("/", 1)[0]}))
+        rows[5]["payload"]["output"] = raw.decode()
+        self.save_rows(rows)
+        self.assertTrue(protocol.execute(self.req)["complete"])
+        rows[5]["payload"]["output"] = raw.decode()[:-1]
+        self.save_rows(rows)
+        with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
+            protocol.execute(self.req)
 
     def test_public_enumeration_sort_before_skill_read_is_only_filename_discovery(self):
         rows = self.trace_rows()
@@ -230,7 +309,7 @@ class InjectionTests(unittest.TestCase):
                 elif mutation == "truncated":
                     rows[3]["payload"]["output"] = rows[3]["payload"]["output"][:100]
                 elif mutation == "changed":
-                    rows[3]["payload"]["output"] = rows[3]["payload"]["output"].replace("SYNTHETIC validate", "SYNTHETIC tampered")
+                    rows[3]["payload"]["output"] = rows[3]["payload"]["output"].replace("fixture-guide", "tampered-guide")
                 elif mutation == "failed":
                     rows[3]["payload"]["stop_reason"] = "fatal"
                 else:
@@ -273,14 +352,14 @@ class InjectionTests(unittest.TestCase):
     def test_two_cases_cannot_observe_different_skill_content(self):
         path = self.trials[1][1]
         rows = [json.loads(line) for line in path.read_text().split("\n") if line]
-        rows[3]["payload"]["output"] = rows[3]["payload"]["output"].replace("SYNTHETIC validate", "SYNTHETIC different")
+        rows[3]["payload"]["output"] = rows[3]["payload"]["output"].replace("fixture-guide", "different-guide")
         path.write_text("\n".join(json.dumps(r) for r in rows)+"\n")
         with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
             protocol.execute(self.req)
 
     def test_full_skill_unicode_line_separator_is_not_a_physical_newline(self):
         entries = protocol.read(self.library)
-        entries[0]["body"] += "\nSYNTHETIC Unicode 中文🙂\u2028in one line."
+        entries[1]["body"] += "\nSYNTHETIC Unicode 中文🙂\u2028in one line."
         self.replace_library(entries)
         self.assertTrue(protocol.execute(self.req)["complete"])
 
@@ -305,8 +384,13 @@ class InjectionTests(unittest.TestCase):
             protocol.execute(self.req)
 
     def test_self_declared_skill_budget_cannot_change_fixed_experiment_budget(self):
+        self.replace_library([])
         for budget in (8000, 32000):
             with self.subTest(budget=budget):
+                if budget > 16000:
+                    with self.assertRaisesRegex(ValueError, "invalid byte budget"):
+                        self.evo.render_skill([], budget)
+                    continue
                 (self.state / acceptance.SLOT / "SKILL.md").write_bytes(self.evo.render_skill([], budget))
                 config = self.state / "system_config.yaml"
                 config.write_bytes(config.read_bytes().replace(b"104192", b"200192"))

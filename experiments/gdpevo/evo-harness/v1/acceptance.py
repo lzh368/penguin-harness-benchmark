@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 
 SLOT = "skills/evo-harness-learned"
+METHOD_PREFIX = "skills/evo-method-"
 FULL_SKILL_MAX_BYTES = 16000
 
 
@@ -104,7 +105,8 @@ def _snapshot(path):
             require(len(parts) > 1 or member.isdir(), "agent_state root must be a directory")
             entries[name] = "dir" if member.isdir() else "file"
             if member.isdir():
-                require(not name.startswith("agent_state/" + SLOT + "/"),
+                require(not name.startswith("agent_state/" + SLOT + "/")
+                        and not (name.startswith("agent_state/" + METHOD_PREFIX) and len(parts) > 3),
                         "full Skill snapshot cannot contain nested package directories")
                 continue
             stream = archive.extractfile(member)
@@ -116,13 +118,41 @@ def _snapshot(path):
     for name in entries:
         require(all(entries.get(str(parent)) != "file" for parent in PurePosixPath(name).parents),
                 "snapshot file/directory path conflict")
+    for name, kind in entries.items():
+        if kind == "dir" and name.startswith("agent_state/" + METHOD_PREFIX):
+            require(re.fullmatch(r"agent_state/skills/evo-method-[0-9a-f]{20}", name)
+                    and entries.get(name + "/SKILL.md") == "file",
+                    "native method directory must contain its manifest-bound SKILL.md")
     require("system_config.yaml" in files and "AGENTS.md" in files, "native snapshot State files are missing")
     return {"snapshot_sha256": sha(raw), "files": files}
 
 
+def learned_state_file(name):
+    return name.startswith(SLOT + "/") or name.startswith(METHOD_PREFIX)
+
+
+def package_files_from_state(data, evo):
+    """Recover the export package using its exact, canonical sibling mapping.
+
+    Reserved sibling paths cannot be hidden outside the learned slot. The Evo
+    parser validates path/name identity; the complete package validator verifies
+    bodies and the State mapper must reproduce every reserved file byte.
+    """
+    selected = {name: raw for name, raw in data.items() if learned_state_file(name)}
+    reader_path = SLOT + "/SKILL.md"
+    require(reader_path in selected, "snapshot learned slot must contain only SKILL.md and declared native methods")
+    reader = evo.parse_reader(selected[reader_path])
+    package = {"SKILL.md": selected[reader_path]}
+    for entry in reader["entries"]:
+        require(entry["state_path"] in selected, "snapshot lacks a declared native method Skill")
+        package[entry["path"]] = selected[entry["state_path"]]
+    require(evo.package_state_files(package) == selected,
+            "snapshot learned slot must contain only SKILL.md and exact manifest native methods")
+    return package
+
+
 def package_from_snapshot(data, evo):
-    selected = {name.removeprefix(SLOT + "/"): raw for name, raw in data.items() if name.startswith(SLOT + "/")}
-    require(set(selected) == {"SKILL.md"}, "snapshot learned slot must contain only SKILL.md")
+    selected = package_files_from_state(data, evo)
     with tempfile.TemporaryDirectory(prefix="evo-freeze-verify-") as temp:
         root = Path(temp)
         for name, raw in selected.items():
@@ -163,15 +193,15 @@ def verify_freeze(req, verify_export, evo):
     final_package = package_from_snapshot(final["files"], evo)
     require(h0_package["empty"] is True, "H0 must start with the valid empty learned reader")
     require(final_package == exported, "final snapshot learned slot differs from verified export")
-    h0_skill = evo.parse_skill(h0["files"][SLOT + "/SKILL.md"])
-    final_skill = evo.parse_skill(final["files"][SLOT + "/SKILL.md"])
+    h0_skill = evo.parse_reader(h0["files"][SLOT + "/SKILL.md"])
+    final_skill = evo.parse_reader(final["files"][SLOT + "/SKILL.md"])
     for state in (h0, final):
         verify_output_budget(state["files"]["system_config.yaml"], h0_skill["max_bytes"])
     require(h0_skill["max_bytes"] == final_skill["max_bytes"],
             "complete Skill byte budget must remain frozen between H0 and final")
     def outside_slot(files):
         return {name: raw for name, raw in files.items()
-                if name != "system_config.yaml" and not name.startswith(SLOT + "/")}
+                if name != "system_config.yaml" and not learned_state_file(name)}
     require(h0_config == final_config and outside_slot(h0["files"]) == outside_slot(final["files"]),
             "State changed outside learned slot and top-level version")
     equivalent = h0_package == final_package

@@ -154,17 +154,19 @@ import importlib.util,json,sys
 from pathlib import Path
 spec=importlib.util.spec_from_file_location("probe_evo",sys.argv[1])
 evo=importlib.util.module_from_spec(spec);spec.loader.exec_module(evo)
+fixed={"id":"boundary-general","level":"general","description":"NATIVE_GENERAL_DESCRIPTION: check stated snapshot grain.","trigger":"task states current date",
+       "scope":"same account snapshot","body":"NATIVE_GENERAL_BODY: preserve account and observation-date grain before joining."}
 def entry(n):
-    return {"id":"boundary-guide","level":"general","trigger":"default_project","scope":"default_project",
+    return {"id":"boundary-topic","level":"topic","topic":"synthetic","trigger":"default_project","scope":"default_project",
             "body":("x"*79+"\\n")*(n//80)+"x"*(n%80)}
 low,high,best=1,16000,None
 while low<=high:
     n=(low+high)//2
-    try: raw=evo.render_skill([entry(n)],16000)
+    try: raw=evo.render_package([entry(n),fixed],16000)
     except ValueError: high=n-1
     else: best=entry(n);low=n+1
-assert len(evo.render_skill([best],16000))==16000
-Path(sys.argv[2]).write_text(json.dumps([best]))
+assert sum(map(len,evo.render_package([best,fixed],16000).values()))==16000
+Path(sys.argv[2]).write_text(json.dumps([best,fixed]))
 `, evo, path.join(tmp, "library.json")]);
 const skill = path.join(original, "skills/evo-harness-learned");
 await fs.writeFile(
@@ -200,6 +202,18 @@ const h0After = inventory(h0State);
 if (JSON.stringify(h0Before.files) !== JSON.stringify(h0After.files)) throw Error("H0 frozen State changed after native restore");
 await fs.rm(skill,{recursive:true});
 execFileSync("python3", ["-B", evo, path.join(tmp,"export.json")]);
+// Install the canonical sibling mapping, never leave methods as Reader support files.
+execFileSync("python3", ["-B", "-c", `
+import importlib.util,sys,shutil
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("probe_evo",sys.argv[1]);evo=importlib.util.module_from_spec(spec);spec.loader.exec_module(evo)
+package,state=Path(sys.argv[2]),Path(sys.argv[3])
+evo.validate_package(package)
+files={name:(package/name).read_bytes() for name in evo.filemap(package)}
+mapped=evo.package_state_files(files);shutil.rmtree(package)
+for name,raw in mapped.items():
+    target=state/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw)
+`, evo, skill, original]);
 const before = inventory(original);
 const transport = path.join(tmp, "state.tar.gz");
 execFileSync("tar", ["-czf", transport, "-C", original, "."]);
@@ -243,14 +257,33 @@ const nativePromptFileParameters =
   nativeDispatch?.parameters.properties.prompt_sha256?.type === "string" &&
   !nativeDispatch?.parameters.required.includes("prompt");
 const outputs = [];
-const fullSkill = await fs.readFile(path.join(installed, "skills/evo-harness-learned/SKILL.md"), "utf8");
+const nativeSkills = await core.listInstalledSkills(secondHome, "default_project", "target");
+const skillPaths = Object.keys(before.files).filter(name => /^skills\/(?:evo-harness-learned|evo-method-[a-f0-9]+)\/SKILL\.md$/.test(name)).sort();
+const readerRaw = await fs.readFile(path.join(installed, "skills/evo-harness-learned/SKILL.md"), "utf8");
+const manifest = JSON.parse(execFileSync("python3", ["-B", "-c", `
+import importlib.util,json,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("probe_evo",sys.argv[1]);evo=importlib.util.module_from_spec(spec);spec.loader.exec_module(evo)
+print(json.dumps(evo.parse_reader(Path(sys.argv[2]).read_bytes())))
+`, evo, path.join(installed, "skills/evo-harness-learned/SKILL.md")], {encoding:"utf8"}));
+const requiredPaths = new Set(["skills/evo-harness-learned/SKILL.md", ...manifest.entries.filter(e=>e.load_mode==="body").map(e=>e.state_path)]);
+if (!readerRaw.includes("NATIVE_GENERAL_DESCRIPTION") || readerRaw.includes("NATIVE_GENERAL_BODY")) throw Error("incorrect general Reader loading");
+const discoveredNames = nativeSkills.map(skill => skill.name).sort();
+const expectedNames = skillPaths.map(name => name.split("/")[1]).sort();
+if (JSON.stringify(discoveredNames) !== JSON.stringify(expectedNames) || skillPaths.length !== 3)
+  throw Error("native loader did not discover Reader and two independent methods");
+let packageBytes = 0;
+for (const relative of skillPaths) {
+const fullSkill = await fs.readFile(path.join(installed, relative), "utf8");
+packageBytes += Buffer.byteLength(fullSkill);
+if (!requiredPaths.has(relative)) continue;
 for (const name of ["read_file", "exec_command"]) {
   const config = core.buildToolConfig(imported.state);
   const env = new core.Environment({ workspaceDir: tmp, toolConfig: config });
   const messages = [];
   const args = name === "read_file"
-    ? { file_path: path.join(installed, "skills/evo-harness-learned/SKILL.md"), limit: 2000 }
-    : { cmd: "cat SKILL.md", workdir: path.join(installed, "skills/evo-harness-learned") };
+    ? { file_path: path.join(installed, relative), limit: 2000 }
+    : { cmd: "cat SKILL.md", workdir: path.dirname(path.join(installed, relative)) };
   for await (const message of env.executeTool({
     toolCall: core.toolCall({name, arguments: JSON.stringify(args), toolCallId: "full-skill-" + name}),
   })) messages.push(message);
@@ -266,8 +299,9 @@ for (const name of ["read_file", "exec_command"]) {
     const lines = fullSkill.replace(/\n$/, "").split("\n");
     complete = lines.every((line, index) => observed.get(index + 1) === line);
   }
-  outputs.push({ tool: name, truncated, complete, skill_bytes: Buffer.byteLength(fullSkill), output_chars: output.length });
+  outputs.push({ path: relative, tool: name, truncated, complete, skill_bytes: Buffer.byteLength(fullSkill), output_chars: output.length });
   env.dispose();
+}
 }
 session.dispose();
 const after = inventory(installed);
@@ -287,6 +321,10 @@ const report = {
   after_exact: equals(ready, after),
   native_prompt_file_parameters: nativePromptFileParameters,
   full_skill_output: outputs,
+  native_skill_names: discoveredNames,
+  loading_policy: "official-cl-context-body-general-description",
+  required_skill_paths: [...requiredPaths].sort(),
+  package_bytes: packageBytes,
   method_source: source,
   compiled_native_dependencies: built,
   probe_root: tmp,
@@ -298,7 +336,7 @@ if (
   !report.native_load_exact ||
   !report.after_exact ||
   !report.native_prompt_file_parameters ||
-  outputs.some(output => output.truncated || !output.complete || output.skill_bytes !== 16000)
+  packageBytes !== 16000 || outputs.some(output => output.truncated || !output.complete)
 )
   throw new Error(JSON.stringify(report));
 await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");

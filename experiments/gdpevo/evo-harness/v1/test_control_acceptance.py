@@ -62,7 +62,7 @@ class ControllerAcceptanceTests(unittest.TestCase):
         self.state.mkdir(parents=True)
         self.target = agents / "synthetic-target/agent_state"
         self.target.mkdir(parents=True)
-        shutil.copytree(fixture.submission / "skill", self.target / "skills/evo-harness-learned")
+        test_protocol.install_package(self.evo, fixture.submission / "skill", self.target)
         (self.target / "system_config.yaml").write_text("version: 1\nsystem_prompt: SYNTHETIC frozen target\nhooks:\n  enabled: false\n" + test_protocol.SYNTHETIC_OUTPUT_TOOLS)
         (self.target / "AGENTS.md").write_text("SYNTHETIC fixed target instructions\n")
         self.h0 = self.root / "h0.tar.gz"
@@ -72,7 +72,7 @@ class ControllerAcceptanceTests(unittest.TestCase):
             h0_state = Path(temporary) / "agent_state"
             shutil.copytree(self.target, h0_state)
             if not fixture.all_success:
-                shutil.rmtree(h0_state / "skills/evo-harness-learned")
+                shutil.rmtree(h0_state / "skills")
                 self.evo.export_skill({"library": str(fixture.library), "limits": fixture.limits,
                     "max_bytes": 16000, "output": str(h0_state / "skills/evo-harness-learned")})
                 (self.target / "system_config.yaml").write_text((self.target / "system_config.yaml").read_text().replace("version: 1", "version: 2"))
@@ -376,9 +376,11 @@ class ControllerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(accepted["injection"]), 2)
         self.assertEqual(sum(len(phase["cells"]) for phase in accepted["injection"]), 10)
         self.assertTrue(all(cell["entries"] == 0 and cell["skill_bytes"] > 0 for cell in accepted["injection"][0]["cells"]))
-        self.assertTrue(all(cell["entries"] > 0 and cell["skill_bytes"] > 0 for cell in accepted["injection"][1]["cells"]))
+        self.assertTrue(all(cell["entries"] == 2 and cell["skill_bytes"] > 0 for cell in accepted["injection"][1]["cells"]))
         for phase in accepted["injection"]:
             self.assertEqual({cell["skill_sha256"] for cell in phase["cells"]}, {phase["skill_sha256"]})
+            self.assertTrue(all(cell["skill_files"] == phase["skill_files"] for cell in phase["cells"]))
+            self.assertEqual(len(phase["skill_files"]), 1 if phase["cells"][0]["entries"] == 0 else 3)
 
 
 if __name__ == "__main__":

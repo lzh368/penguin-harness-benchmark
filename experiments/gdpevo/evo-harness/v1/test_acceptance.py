@@ -33,7 +33,7 @@ class FreezeTests(unittest.TestCase):
         (self.h0 / "AGENTS.md").write_text("SYNTHETIC frozen agent guidance\n")
         shutil.copytree(self.h0, self.final)
         shutil.rmtree(self.final / acceptance.SLOT)
-        shutil.copytree(fixture.submission / "skill", self.final / acceptance.SLOT)
+        test_protocol.install_package(self.evo, fixture.submission / "skill", self.final)
         final_version = 1 if all_success else 2
         (self.final / "system_config.yaml").write_bytes((self.h0 / "system_config.yaml").read_bytes().replace(
             b"version: 1\n", f"version: {final_version}\n".encode()))
@@ -153,25 +153,29 @@ class FreezeTests(unittest.TestCase):
 
     def test_final_slot_must_equal_verified_export_even_when_both_packages_are_valid(self):
         shutil.rmtree(self.final / acceptance.SLOT)
-        shutil.copytree(self.h0 / acceptance.SLOT, self.final / acceptance.SLOT)
+        test_protocol.install_package(self.evo, self.h0 / acceptance.SLOT, self.final)
         self.pack(self.final, self.final_archive)
         with self.assertRaisesRegex(ValueError, "slot differs from verified export"):
             self.verify()
 
     def test_h0_must_be_valid_empty_fixed_reader(self):
         shutil.rmtree(self.h0 / acceptance.SLOT)
-        shutil.copytree(self.f.submission / "skill", self.h0 / acceptance.SLOT)
+        test_protocol.install_package(self.evo, self.f.submission / "skill", self.h0)
         self.pack(self.h0, self.h0_archive)
         with self.assertRaisesRegex(ValueError, "H0 must start"):
             self.verify()
         (self.h0 / acceptance.SLOT / "SKILL.md").write_text("SYNTHETIC changed reader")
         self.pack(self.h0, self.h0_archive)
-        with self.assertRaisesRegex(ValueError, "reader or full-Skill format changed"):
+        with self.assertRaisesRegex(ValueError, "reader|Skill.*format"):
             self.verify()
 
     def test_complete_skill_byte_budget_cannot_change_with_learned_entries(self):
         for budget in (8000, 32000):
             with self.subTest(budget=budget):
+                if budget > 16000:
+                    with self.assertRaisesRegex(ValueError, "invalid byte budget"):
+                        self.evo.render_skill([], budget)
+                    continue
                 for state, archive in ((self.h0, self.h0_archive), (self.final, self.final_archive)):
                     (state / acceptance.SLOT / "SKILL.md").write_bytes(self.evo.render_skill([], budget))
                     config = state / "system_config.yaml"
@@ -184,6 +188,21 @@ class FreezeTests(unittest.TestCase):
         (self.h0 / acceptance.SLOT / "topic").mkdir()
         self.pack(self.h0, self.h0_archive)
         with self.assertRaisesRegex(ValueError, "nested package directories"):
+            self.verify()
+
+    def test_native_method_siblings_are_exactly_manifest_owned(self):
+        result = self.verify()
+        methods = [name for name in result["final"]["filemap"] if name.startswith(acceptance.METHOD_PREFIX)]
+        self.assertGreaterEqual(len(methods), 1)
+        self.assertTrue(all(len(Path(name).parts) == 3 and Path(name).name == "SKILL.md" for name in methods))
+        unknown = self.final / (acceptance.METHOD_PREFIX + "0" * 20)
+        unknown.mkdir()
+        self.pack(self.final, self.final_archive)
+        with self.assertRaisesRegex(ValueError, "native method directory"):
+            self.verify()
+        (unknown / "SKILL.md").write_text("SYNTHETIC unmanifested skill")
+        self.pack(self.final, self.final_archive)
+        with self.assertRaisesRegex(ValueError, "exact manifest"):
             self.verify()
 
     def test_only_learned_slot_and_plain_version_may_change(self):
