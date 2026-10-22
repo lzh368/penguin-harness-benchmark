@@ -335,6 +335,11 @@ class ControllerAcceptanceTests(unittest.TestCase):
         fixture.setUp()
         self.assertEqual(len(fixture.f.contexts), 5)
         self.assertEqual(len([role for role in fixture.f.roles if role["role"] == "reflector"]), 5)
+        for context, reflection in zip(map(protocol.read, fixture.f.contexts), fixture.f.roles[:-1]):
+            self.assertEqual(reflection["binding"], context["trace"]["binding"])
+            self.assertEqual(reflection, context["reflection"]["audit_request"])
+        self.assertEqual(len({role["binding"]["session_id"] for role in fixture.f.roles}), 6)
+        self.assertEqual(protocol.read(fixture.f.record_path)["reflection_mode"], "solver-session")
         self.assertEqual(len(fixture.f.candidates), 5)
         self.assertFalse(fixture.f.package["empty"])
         final_cells = [{**cell, "expected_version": 2, "session_id": cell["session_id"] + "-final"}

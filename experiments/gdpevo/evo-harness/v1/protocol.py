@@ -112,7 +112,7 @@ def prepare_trainer(req):
     hook_files = evo.filemap(hooks)
     require(set(hook_files) == {"hooks.json", "guard.mjs", "icon.svg"}, "supply the native installed Evo hook package")
     manifest = read(hooks / "hooks.json")
-    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.22.2",
+    require(manifest["name"] == "evo-harness-rsi-toolkit" and manifest["version"] == "2026.10.22.3",
             "wrong native method hook package")
     for point in ("user_prompt", "pre_tool_use", "stop"):
         require(len(manifest[point]) == 1 and manifest[point][0]["command"] == "guard.mjs",
@@ -140,7 +140,7 @@ def prepare_trainer(req):
         (stage / "system_config.yaml").write_text(yaml)
         training = {"guard_version": 2, "train_ids": config["train_ids"], "attempt_id": "attempt-1",
                     "limits": {"general": 5, "topic": 5}, "max_bytes": base_package["max_bytes"],
-                    "injection_mode": "full_skill",
+                    "injection_mode": "full_skill", "reflection_mode": "solver-session",
                     "runtime": config["runtime"], "workspace": "/app",
                     "private_learning": "/logs/agent/evo-harness", "answer_dir": "/app/submission/answers",
                     "feedback_dir": "/logs/agent/evo-harness/feedback",
@@ -153,7 +153,10 @@ def prepare_trainer(req):
         with (stage / "AGENTS.md").open("a") as handle:
             handle.write("\nEvo-Harness continuous training contract: when run_subagent is available, you are "
                          "the training coordinator. Read the installed method Skill and references/group-training.md "
-                         "in full; use its native Solver/Reflector/Evolver children in the frozen training.json order. "
+                         "in full; use five native Solver children in the frozen training.json order, then one independent Evolver. "
+                         "Each original Solver keeps its native conversation for answer, one judge, full authorized feedback "
+                         "observation and negative-feedback reflection; never create a separate Reflector or steer the child. "
+                         "After judging, preserve the answer and stop business queries; write only candidates and seal evidence. "
                          "Do not solve tasks or call judge in the coordinator. Each Solver has exactly one judged attempt; "
                          "zero candidates still requires an Evolver, compilation and a valid training-export.json. "
                          "A child without run_subagent follows only its full assigned role; do not recurse. "
@@ -180,6 +183,7 @@ def verify_export(req):
     submission = Path(req["submission"])
     record = read(req["training_export"])
     require(record["complete"] is True, "training export incomplete")
+    require(record.get("reflection_mode") == "solver-session", "training export must use original Solver-session reflection")
     require(record["runtime"] == req["runtime"], "training runtime changed")
     require(set(record["members"]) == set(req["train_ids"]), "incomplete training members")
     private = Path(req["private_learning"])
@@ -226,6 +230,23 @@ def verify_export(req):
             for original, relative in evidence.items():
                 bind_path(original, private_file(relative))
             bind_path(context["feedback"]["training_snapshot"], path_map[context["feedback"]["training_path"]])
+            frozen_training = read(path_map[context["feedback"]["training_path"]])
+            require(frozen_training.get("reflection_mode") == "solver-session",
+                    "frozen training must require original Solver-session reflection")
+            # Positive members have no reflection role audit, but their full
+            # Solver instructions are still original observed material. This
+            # canonical file is part of exported private learning, not a newly
+            # selected material or a dependency on the vanished container.
+            bind_path(str(Path(frozen_training["private_learning"]) / "roles/solver.md"),
+                      private_file("roles/solver.md"))
+    # Same-session reflection is part of each terminal Solver context. Bind
+    # exported material/output locations before replaying that context; the
+    # earlier canonical judge/context mappings still reject aliases.
+    for audit in record["roles"]:
+        require(set(audit["materials"]) == set(audit["material_files"]), "material mapping differs")
+        require(set(audit["outputs"]) == set(audit["output_files"]), "output mapping differs")
+        for original, relative in {**audit["material_files"], **audit["output_files"]}.items():
+            bind_path(original, private_file(relative))
     evo.validate_contexts(contexts, req["train_ids"], path_map)
     candidate_path = private_file(record["candidates_file"])
     decisions_path = private_file(record["decisions_file"])
@@ -241,26 +262,35 @@ def verify_export(req):
     require(training_root is not None and record["training_root"] == training_root,
             "continuous export must bind its native training root")
     require(sum(a["role"] == "evolver" for a in audits) == 1, "requires one Evolver")
-    require({a["task_id"] for a in audits if a["role"] == "reflector"} ==
-            {c["task_id"] for c in contexts if c["negative"]}, "Reflector coverage mismatch")
+    require([a["task_id"] for a in audits if a["role"] == "reflector"] ==
+            [c["task_id"] for c in contexts if c["negative"]], "original Solver reflection coverage/order mismatch")
     reflected, sessions = [], {c["trace"]["binding"]["session_id"] for c in contexts}
+    by_task = {c["task_id"]: c for c in contexts}
+    reflected_tasks = set()
     for audit in audits:
         require(audit["role"] in ("reflector", "evolver"), "invalid role")
-        require(audit["binding"]["session_id"] not in sessions, "learning roles require fresh sessions")
-        sessions.add(audit["binding"]["session_id"])
-        require(set(audit["materials"]) == set(audit["material_files"]), "material mapping differs")
-        require(set(audit["outputs"]) == set(audit["output_files"]), "output mapping differs")
-        for original, relative in audit["material_files"].items():
-            bind_path(original, private_file(relative))
-        for original, relative in audit["output_files"].items():
-            bind_path(original, private_file(relative))
+        if audit["role"] == "evolver":
+            require(audit["binding"]["session_id"] not in sessions, "Evolver requires a fresh Session")
+            sessions.add(audit["binding"]["session_id"])
+        else:
+            task = audit["task_id"]
+            require(task not in reflected_tasks, "duplicate Solver reflection audit")
+            reflected_tasks.add(task)
+            context = by_task[task]
+            require(audit["binding"] == context["trace"]["binding"],
+                    "reflection must retain the original Solver binding")
+            require(audit["traces"] == [source["path"] for source in context["trace"]["sources"]],
+                    "reflection must retain the original terminal Solver traces")
+            require({k: v for k, v in audit.items() if k not in ("op", "material_files", "output_files")} ==
+                    {k: v for k, v in context.get("reflection", {}).get("audit_request", {}).items() if k != "op"},
+                    "reflection audit differs from captured original Solver evidence")
         materials = audit["materials"]
         require(len(audit["outputs"]) == 1, "one role output required")
         if audit["role"] == "reflector":
-            member = record["members"][audit["task_id"]]
-            require(member["container_context_path"] in materials, "Reflector did not receive bound context")
+            require(context.get("reflection", {}).get("mode") == "solver-session",
+                    "missing original Solver reflection evidence")
             proposals = read(path_map[audit["outputs"][0]])
-            require(all(c["task_id"] == audit["task_id"] for c in proposals), "Reflector output crosses task boundary")
+            require(all(c["task_id"] == audit["task_id"] for c in proposals), "Solver reflection output crosses task boundary")
             reflected.extend(proposals)
         else:
             require(record["container_candidates_path"] in materials and record["container_library_path"] in materials,
@@ -270,7 +300,7 @@ def verify_export(req):
             require(sha(path_map[audit["outputs"][0]]) == sha(decisions_path), "Evolver decisions differ")
         require(audit["role_text_path"] in materials, "role instructions not read")
         evo.audit_role({**audit, "materials": materials, "path_map": path_map, "require_role_seal": True})
-    require(reflected == read(candidate_path), "candidate concatenation differs from Reflector outputs")
+    require(reflected == read(candidate_path), "candidate concatenation differs from original Solver reflection outputs")
     for binding in [c["trace"]["binding"] for c in contexts] + [a["binding"] for a in audits]:
         require(all(binding[k] == req["runtime"][k] for k in ("provider", "model_id")), "frozen runtime mismatch")
     evo.verify_compilation({"train_ids": req["train_ids"], "contexts": [str(private_file(record["members"][t]["context_file"])) for t in req["train_ids"]],

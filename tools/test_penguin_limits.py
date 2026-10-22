@@ -251,6 +251,37 @@ else: raise SystemExit('unexpected penguin command: '+repr(args))
             self.assertTrue(json.loads((logs / 'penguin-outcome.json').read_text())['timed_out'])
             self.assertTrue((logs / 'penguin/traces/solver/trace.jsonl').is_file())
 
+    def test_solver_reflection_uses_one_cumulative_native_session_cost(self):
+        """Native usage is grouped by Session, never by logical audit roles."""
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, _, _ = self.make_agent(Path(tmp))
+            agent.logs_dir.mkdir(parents=True, exist_ok=True)
+            agent._scrub_host_logs = lambda: 0
+            agent._register_late_scrub = lambda: None
+            (agent.logs_dir / 'penguin-outcome.json').write_text(json.dumps({
+                'status': 'completed', 'exit_code': 0, 'native_sessions_idle': True,
+                'cost_status': 'settled', 'timed_out': False, 'server_ready': True,
+            }))
+            groups = [{'key': 'training-root', 'cost': .01, 'hasUncosted': False, 'requests': 2},
+                      {'key': 'solver-1', 'cost': .07, 'hasUncosted': False, 'requests': 7},
+                      {'key': 'evolver', 'cost': .02, 'hasUncosted': False, 'requests': 3}]
+            # Solver's seven requests include its reflection. A second audit
+            # label is not a new native usage row and must never add another .07.
+            (agent.logs_dir / 'penguin-cost-by-session.json').write_text(json.dumps({'groups': groups}))
+            context = AgentContext()
+            agent.populate_context_post_run(context)
+            self.assertEqual(context.cost_usd, .1)
+            self.assertEqual(context.metadata['n_sessions'], 3)
+            self.assertEqual(context.metadata['requests'], 12)
+            self.assertTrue(context.metadata['cost_complete'])
+            groups[1]['hasUncosted'] = True
+            (agent.logs_dir / 'penguin-cost-by-session.json').write_text(json.dumps({'groups': groups}))
+            context = AgentContext()
+            agent.populate_context_post_run(context)
+            self.assertIsNone(context.cost_usd)
+            self.assertEqual(context.metadata['cost_priced_usd'], .1)
+            self.assertFalse(context.metadata['cost_complete'])
+
     def test_quiescence_and_unknown_cost_survive_harbor_metadata_population(self):
         with tempfile.TemporaryDirectory() as tmp:
             agent, _, _ = self.make_agent(Path(tmp))

@@ -143,8 +143,10 @@ exact frozen package into a new Target State, and invokes the five final test
 workers concurrently.
 It records the whole complete matrix on the test Benchmark scoreboard.
 The container's training root delegates only its batch; it cannot run baseline
-or held-out test. Reflector/Evolver are native role Sessions, never Codex-written
-lessons. Codex only starts the root, observes, and addresses explicit infra
+or held-out test. Each native Solver answers and reflects in its original
+conversation after fully observing its one authorized judge response; the
+independent Evolver compiles the whole batch once. No separate Reflector Session
+is created, and Codex never writes lessons. Codex only starts the root, observes, and addresses explicit infra
 failures. It does not ask a script to choose the next experiment phase.
 
 Follow the installed `references/control.md` for the request schemas. Host
@@ -173,8 +175,15 @@ checks using the exported logs and traces, even after container paths disappear.
 Trace basenames must be unambiguous; missing evidence blocks publication.
 Each training member uses the immutable attempt identity in installed
 `training.json`. The canonical request/feedback paths are derived from that
-profile, not selected by the caller. Every learning role must be a fresh native
-child of the same training root. Capture rejects visible extra judge probes,
+profile, not selected by the caller. Each task gets a fresh native Solver child of the same training root. Its
+reflection audit reuses that exact Session, runtime and complete terminal trace;
+only the batch Evolver is another fresh child. Negative feedback requires a
+sealed reflection output, including when justified candidates are empty.
+Success does not require reflection, and judge errors are not negative feedback.
+The full answer-and-reflection Session is captured only after it finishes;
+subsequent trace mutation remains an error. Its cumulative native usage is
+counted once by Session, including reflection, not once per audit role.
+Unknown usage remains pending and keeps its budget reservation. Capture rejects visible extra judge probes,
 repeated judging and substituted receipts. This is a cooperative method
 boundary, not a security sandbox against arbitrary hidden code/network calls.
 
@@ -190,7 +199,7 @@ command-output limits before transport: supported native loading/turn-cap setup
 is then byte-idempotent. All three complete State maps must equal the frozen
 snapshot; there is no blanket startup-rewrite exemption. Vault, memory and
 schedules are not read or retained by this inventory.
-Method revision `2026.10.22.2` exports exactly one runtime file: `SKILL.md`.
+Method revision `2026.10.22.3` exports exactly one runtime file: `SKILL.md`.
 It contains the fixed Reader, canonical inline metadata and every complete
 compiled general/topic procedure. There is no external index, selector, entry
 file, runtime shortlist or `max_entries` setting. Private compilation still
@@ -200,6 +209,15 @@ budget. GDPevo preparation, freeze and injection acceptance reject any other
 `max_bytes`, even when both States agree or native output capacity is enlarged.
 No line may exceed native read_file's 2000 UTF-16 unit limit. Oversize drafts
 must be revised before sealing; they are never truncated at injection time.
+
+The reference CL path at official commit
+`3c7c7b8c62a3f07da1d4407aa03f0ca079954bcf` continues the original Solver's
+message history and model for feedback-based proposals. It loads every current
+context skill body, but only general skill descriptions; its defined
+`_select_skills` is not called on that path. The paper's budgeted Select is a
+separate description. Loading the full current group follows the implementation;
+putting every compiled procedure, including general bodies, in one `SKILL.md`
+is this GDPevo experiment's explicit organization choice.
 
 The audit checks the original test Session's complete `SKILL.md` observation.
 Exact native read_file pages may be combined in actual observation order;
