@@ -223,6 +223,16 @@ class RegistrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "preflight pins"):
             self.run_prepare()
 
+    def test_full_rsi_keeps_six_environment_preflight_for_prepare_and_verify(self):
+        self.run_prepare()
+        self.preflight['schema'] = 'evo-offline-replay-deployment-preflight-v1'
+        self.preflight['task_ids'] = list(self.config['test_ids'])
+        self.save_preflight()
+        self.save_config()
+        for operation in ('prepare-benchmarks', 'verify-benchmarks'):
+            with self.assertRaisesRegex(ValueError, 'preflight roster'):
+                protocol.execute({**self.req, 'op': operation})
+
     def test_original_bad_case_names_are_not_silently_overwritten(self):
         old = self.output / self.config["test_benchmark_id"]
         (old / "tg003-test-001").mkdir(parents=True)

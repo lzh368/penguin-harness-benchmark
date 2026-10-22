@@ -72,7 +72,7 @@ def _bundle_manifest(path):
     raise ValueError("missing source bundle manifest")
 
 
-def _inputs(req, validate_config):
+def _inputs(req, validate_config, *, preflight_scope="full-rsi"):
     config = read(req["config"])
     require(sha(req["config"]) == req["config_sha256"], "frozen config hash mismatch")
     checked = validate_config(config, req["repo"])
@@ -125,7 +125,19 @@ def _inputs(req, validate_config):
     expected_pins.update({key: config[key] for key in ("bundle_sha256", "image_manifest_sha256")})
     expected_pins.update({key: runtime[key] for key in ("provider", "model_id", "api_host")})
     require(preflight["pins"] == expected_pins, "preflight pins differ from frozen config")
-    require(preflight["task_ids"] == [f"tg{config['group']}-train", *config["test_ids"]], "preflight roster differs")
+    # The final-only replay probes five test environments; the full RSI
+    # protocol still requires its training environment plus all five tests.
+    # Scope is fixed by the caller, never inferred from an incomplete roster.
+    if preflight_scope == "offline-replay-test-only":
+        require(config["protocol"] == "evo-harness-offline-replay-v1"
+                and preflight.get("schema") == "evo-offline-replay-deployment-preflight-v1",
+                "offline replay requires its explicit test-only preflight scope")
+        expected_tasks = config["test_ids"]
+    else:
+        require(preflight_scope == "full-rsi" and config["protocol"] == "evo-harness-gdpevo-v1",
+                "full RSI preflight scope differs from protocol")
+        expected_tasks = [f"tg{config['group']}-train", *config["test_ids"]]
+    require(preflight["task_ids"] == expected_tasks, "preflight roster differs")
     return config, checked, output
 
 

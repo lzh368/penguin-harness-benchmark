@@ -34,6 +34,11 @@ class ReplayTests(unittest.TestCase):
             limits={'general': 5, 'topic': 5}, max_bytes=16000, budget_usd=10, paid_authorized=True,
             source_manifest=str(source), source_manifest_sha256=protocol.sha(source),
             test_agent_id='create: synthetic-target')
+        # Mirror collect_preflight.py's actual replay receipt, not the inherited
+        # six-environment full-RSI fixture. _inputs is always real and unmocked.
+        registration.preflight.update(schema='evo-offline-replay-deployment-preflight-v1',
+                                      task_ids=list(self.config['test_ids']))
+        registration.save_preflight()
         registration.save_config()
         self.base = {'config': str(registration.config_path), 'config_sha256': protocol.sha(registration.config_path), 'evo_tool': self.tool}
         self.registered = replay.execute({**self.base, 'op': 'prepare-benchmarks'})
@@ -101,6 +106,39 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result['new_baseline_calls'], 0)
         statement = next(self.benchmark.glob('CASE-*/statement/README.md')).read_text()
         self.assertIn('No new training run, baseline or additional test round', statement)
+
+    def test_real_test_only_preflight_prepares_and_verifies_without_train_probe(self):
+        receipt = protocol.read(self.config['deployment']['preflight_receipt'])
+        self.assertEqual(receipt['schema'], 'evo-offline-replay-deployment-preflight-v1')
+        self.assertEqual(receipt['task_ids'], self.config['test_ids'])
+        self.assertEqual(len(receipt['task_ids']), 5)
+        for operation in ('prepare-benchmarks', 'verify-benchmarks'):
+            result = replay.execute({**self.base, 'op': operation})
+            self.assertEqual(result, self.registered)
+        self.assertFalse((self.registration.output / self.config['benchmark_id']).exists())
+
+    def test_test_only_preflight_wrong_pins_roster_or_scope_rejected_for_both_ops(self):
+        original = copy.deepcopy(self.registration.preflight)
+        cases = [
+            ({'task_ids': self.config['test_ids'][:-1]}, 'preflight roster'),
+            ({'task_ids': ['tg003-train', *self.config['test_ids']]}, 'preflight roster'),
+            ({'task_ids': ['tg005-test-001', *self.config['test_ids'][1:]]}, 'preflight roster'),
+            ({'schema': 'evo-deployment-preflight-v1'}, 'test-only preflight scope'),
+            ({'pins': {**original['pins'], 'benchmark_commit': 'c' * 40}}, 'preflight pins'),
+            ({'passed': False}, 'matching isolation preflight'),
+            ({'model_calls': 1}, 'matching isolation preflight'),
+            ({'five_test_phases_overlap': False}, 'matching isolation preflight'),
+            ({'test_concurrency': 4}, 'matching isolation preflight'),
+        ]
+        for changes, message in cases:
+            with self.subTest(changes=changes):
+                self.registration.preflight = {**copy.deepcopy(original), **changes}
+                self.registration.save_preflight()
+                self.registration.save_config()
+                request = {**self.base, 'config_sha256': protocol.sha(self.registration.config_path)}
+                for operation in ('prepare-benchmarks', 'verify-benchmarks'):
+                    with self.assertRaisesRegex(ValueError, message):
+                        replay.execute({**request, 'op': operation})
 
     def test_additional_round_and_baseline_phase_rejected(self):
         with self.assertRaisesRegex(ValueError, 'only final test round 1'):

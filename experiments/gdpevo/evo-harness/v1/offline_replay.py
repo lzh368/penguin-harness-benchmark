@@ -86,7 +86,8 @@ def benchmarks(req, config):
     deploy = config["deployment"]
     request = {**req, "repo": req.get("repo", deploy["benchmark_checkout"]),
         "output": req.get("output", str(Path(deploy["penguin_home"]) / deploy["project_id"] / "benchmarks"))}
-    _, checked, output = registration._inputs(request, validate_replay_config)
+    _, checked, output = registration._inputs(
+        request, validate_replay_config, preflight_scope="offline-replay-test-only")
     benchmark_id, files = registration._files(config, checked, "test")
     old = ("The training group contains five sequential members in one trial. Test cases\n"
            "are independent; the main Penguin launches five native workers concurrently\n"

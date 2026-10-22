@@ -465,8 +465,11 @@ and its `source_manifest_sha256`, `limits: {"general": 5, "topic": 5}`,
 than $10. `test_agent_id` is the exact native Target id (optionally prefixed by
 `create:`). `test_benchmark_id` names this new test Benchmark; the distinct
 `benchmark_id` is an unused compatibility identity and is never registered or
-executed. The public zero-model preflight may check all six original container
-configurations; that does not represent a paid training run.
+executed. Replay requires its explicit test-only zero-model deployment preflight:
+exactly the five test task ids and the replay receipt schema, with the same
+pinned artifacts, isolation checks and five-way overlap. The full RSI protocol
+continues to require all six environments, including training; neither scope
+accepts the other scope's roster or fabricates a missing probe.
 
 Every request carries `config` and `config_sha256`. These operations prepare or
 validate only; none calls Harbor, spawns a role or advances the experiment:
