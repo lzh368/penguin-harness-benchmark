@@ -31,20 +31,12 @@ def _native_read(pairs, path, raw, workspace, slot, inspection, skill_files=None
     for pair in sorted(pairs, key=lambda value: value[1]["_position"]):
         call = pair[0]
         observation = pair[1]
-        if observation.get("stop_reason") != "completed" or call["_position"] >= observation["_position"]:
+        if (observation.get("stop_reason") != "completed" or observation.get("images")
+                or call["_position"] >= observation["_position"]):
             continue
         if call.get("name") == "exec_command":
-            try:
-                commands, workdir, redirects, _ = inspection._readonly_commands(call, workspace, slot, skill_files=skill_files)
-            except (ValueError, TypeError, KeyError):
-                continue
-            argv = commands[0]["argv"]
-            # Exact stdout from one resolved cat operand is a full observation.
-            # Combined commands, redirection, pipelines and head cannot supply
-            # this proof even when their visible text happens to resemble it.
-            if (len(commands) == 1 and not redirects and argv[0] == "cat"
-                    and [inspection._path(value, workdir) for value in inspection._file_operands(argv)] == [path]
-                    and observation["output"].encode() == raw):
+            if inspection.complete_file_stdout(call, observation["output"], raw, path, workspace, slot,
+                                                skill_files=skill_files):
                 last = observation["_position"] if last < 0 else min(last, observation["_position"])
             continue
         if call.get("name") != "read_file":

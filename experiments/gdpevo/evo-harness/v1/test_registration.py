@@ -40,7 +40,7 @@ class RegistrationTests(unittest.TestCase):
                         "api_host": "synthetic.invalid", "effective_reasoning_effort": "high", "client_type": "synthetic"},
             "api_host": "synthetic.invalid", "benchmark_id": "synthetic-train", "test_benchmark_id": "synthetic-test",
             "bundle_sha256": registration.sha(self.bundle), "image_manifest_sha256": registration.sha(image)})
-        self.config["versions"].update(penguin_commit="a" * 40, benchmark_commit="b" * 40, skill="2026.10.22.6")
+        self.config["versions"].update(penguin_commit="a" * 40, benchmark_commit="b" * 40, skill="2026.10.22.7")
         self.config["deployment"] = {"benchmark_checkout": str(self.repo), "penguin_home": str(self.project.parent),
             "project_id": self.project.name, "bundle": str(self.bundle), "bundle_sha256": self.config["bundle_sha256"],
             "image_manifest": str(image), "image_manifest_sha256": self.config["image_manifest_sha256"],
@@ -156,6 +156,11 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "published")
             for case in result[phase]["case_ids"]:
                 self.assertRegex(case, r"^CASE-[A-Za-z0-9_-]+$")
+                statement = (root / case / "statement/README.md").read_text()
+                self.assertIn("case-sensitive `test_agent_id`", statement)
+                self.assertIn("Do not lowercase", statement)
+                self.assertIn("use that exact value for both", statement)
+                self.assertIn("file before Harbor starts", statement)
                 launch = protocol.read(root / case / "statement/harbor-launch.json")
                 argv = launch["argv_template"]
                 options = [argv[n + 1] for n, item in enumerate(argv) if item == "--ak"]

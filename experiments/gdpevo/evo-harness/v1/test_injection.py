@@ -267,7 +267,7 @@ class InjectionTests(unittest.TestCase):
     def test_complete_standalone_cat_absolute_relative_and_double_dash(self):
         original = self.trace_rows()
         target = json.loads(original[2]["payload"]["arguments"])["file_path"]
-        for args in ({"cmd": "cat " + target}, {"cmd": "cat -- " + target},
+        for args in ({"cmd": "cat " + target}, {"cmd": "cat " + target + ";"}, {"cmd": "cat -- " + target},
                      {"cmd": "cat SKILL.md", "workdir": target.rsplit("/", 1)[0]},
                      {"cmd": "cat -- SKILL.md", "workdir": target.rsplit("/", 1)[0]}):
             with self.subTest(args=args):
@@ -276,6 +276,63 @@ class InjectionTests(unittest.TestCase):
                 rows[3]["payload"]["output"] = self.skill_raw().decode()
                 self.save_rows(rows)
                 self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_readonly_discovery_and_final_cat_prove_complete_observation(self):
+        original = self.trace_rows()
+        target = json.loads(original[2]["payload"]["arguments"])["file_path"]
+        state = original[0]["payload"]["agent_state"]
+        commands = ["ls -la /app/input/payloads/ && cat " + target,
+                    "ls " + state + "/skills && echo '---' && cat " + target,
+                    "pwd && ls /app/input && echo '---' && cat -- " + target]
+        for command in commands:
+            with self.subTest(command=command):
+                rows = copy.deepcopy(original)
+                rows[2]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": command}))
+                rows[3]["payload"]["output"] = "/app\nevo-harness-learned\n---\n" + self.skill_raw().decode()
+                self.save_rows(rows)
+                accepted = protocol.execute(self.req)
+                self.assertTrue(accepted["complete"])
+                self.assertEqual(accepted["cells"][0]["file_read_observed_positions"][acceptance.SLOT + "/SKILL.md"], 4)
+        # A topic body uses the identical shared proof; general bodies remain forbidden.
+        rows = copy.deepcopy(original)
+        method = json.loads(rows[4]["payload"]["arguments"])["file_path"]
+        raw = self.frozen[method.split("/agent_state/", 1)[1]]
+        rows[4]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": "ls /app/input && cat " + method}))
+        rows[5]["payload"]["output"] = "public-file.json\n" + raw.decode()
+        self.save_rows(rows)
+        self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_combined_read_needs_exact_unique_tail_and_no_earlier_business(self):
+        original = self.trace_rows()
+        target = json.loads(original[2]["payload"]["arguments"])["file_path"]
+        raw = self.skill_raw().decode()
+        for command, stdout in (("ls /app/input && cat " + target, "prefix\n" + raw[:-1]),
+                                ("ls /app/input && cat " + target, "prefix\n" + raw + "tail"),
+                                ("ls /app/input && cat " + target, raw + raw),
+                                ("cat /app/instruction.md && cat " + target, "public\n" + raw),
+                                ("ls /app/input | cat " + target, raw),
+                                ("ls /app/input || cat " + target, raw),
+                                ("ls /app/input && cat " + target + ";", raw),
+                                ("ls /app/input && cat " + target + " 2>/dev/null", raw),
+                                ("echo 'pretend Skill text' && cat " + target, raw)):
+            with self.subTest(command=command):
+                rows = copy.deepcopy(original)
+                rows[2]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": command}))
+                rows[3]["payload"]["output"] = stdout
+                self.save_rows(rows)
+                with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
+                    protocol.execute(self.req)
+        rows = copy.deepcopy(original)
+        rows[2]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": "ls /app/input && cat " + target}))
+        rows[3]["payload"]["output"] = "public-file.json\n" + raw
+        early = self.extra_pair(rows, "write_file", {"file_path": "/app/submission/answer.json", "text": "{}"})
+        self.save_rows([*rows[:3], early[0], rows[3], early[1], *rows[4:]])
+        with self.assertRaisesRegex(ValueError, "before complete Skill observation"):
+            protocol.execute(self.req)
+        rows[3]["payload"]["images"] = [{"mime_type": "image/png", "data": "synthetic"}]
+        self.save_rows(rows)
+        with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
+            protocol.execute(self.req)
 
     def test_native_read_pages_complete_in_observation_order(self):
         original = self.trace_rows()
@@ -467,6 +524,31 @@ class InjectionTests(unittest.TestCase):
                 save(path, record)
                 with self.assertRaises(ValueError):
                     protocol.execute(self.req)
+
+
+class PreservedReadFixtureTests(unittest.TestCase):
+    def test_original_010_observations_pass_new_proof_without_rewriting_old_evidence(self):
+        tool = Path(os.environ["EVO_TOOL"])
+        fixture_path = tool.parents[3] / "tests/fixtures/010-full-read-stdout.json"
+        saved = fixture_path.read_bytes()
+        fixtures = json.loads(saved)
+        self.assertEqual({row["execution_version"] for row in fixtures}, {"2026.10.22.5", "2026.10.22.6"})
+        evo = protocol.helper(tool)
+        for row in fixtures:
+            with self.subTest(label=row["label"]):
+                raw = row["expected"].encode()
+                self.assertTrue(row["contains_no_task_answers"])
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), row["expected_sha256"])
+                slot = row["state"] + "/" + acceptance.SLOT
+                pair = ({**row["call"], "_position": 1}, {**row["observation"], "_position": 2})
+                observed = injection._native_read([pair], slot + "/SKILL.md", raw, row["workspace"], slot,
+                                                  evo.inspection, skill_files={slot + "/SKILL.md"})
+                self.assertEqual(observed, 2)
+                changed = (pair[0], {**pair[1], "output": pair[1]["output"][:-1]})
+                with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
+                    injection._native_read([changed], slot + "/SKILL.md", raw, row["workspace"], slot,
+                                           evo.inspection, skill_files={slot + "/SKILL.md"})
+        self.assertEqual(fixture_path.read_bytes(), saved)
 
 
 class ReadonlyShellGrammarTests(unittest.TestCase):

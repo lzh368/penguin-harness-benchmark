@@ -171,6 +171,14 @@ The adjacent `harbor-launch.json` fixes the complete adapter options and runtime
 Replace only the three placeholders for the State archive, unique job name and
 this Benchmark's `.jobs` directory. Pack the assigned native Target/Trainer State
 as instructed by evaluation.md; never run a stock Agent or omit the archive.
+Use the exact case-sensitive `test_agent_id` from the native worker request and
+its `STATE = App Data Dir/agents/<test_agent_id>/agent_state` path from evaluation.md.
+Do not lowercase or hand-invent another Agent directory; confirm that exact
+`STATE/system_config.yaml` exists before packing it. Choose one complete absolute
+archive path under this Benchmark's `.jobs` once; use that exact value for both
+`tar -czf` and `agent_state_tar`, preserving case. Confirm the archive is a regular
+file before Harbor starts. Do not reconstruct or normalize its path from the
+case ID, job name or a returned trial-directory name.
 The launch already includes all `--ak` options, including Node and bundle pins;
 do not insert duplicates or use adapter defaults. Confirm the model-host helper
 agrees with the frozen allowed host. Credentials stay in private configuration.

@@ -390,3 +390,21 @@ format error returns a normal structured incomplete receipt; executed boundary
 violations remain failures. R14 trial evidence and original verdicts are retained.
 The training/test split, once-only actual judge, frozen answer, same-Solver
 reflection, one batch compilation and full-file held-out injection are unchanged.
+
+
+Revision `2026.10.22.7` repairs full-file observation proof for the native
+read-only command combinations seen in the preserved 010 failures. Training and
+test injection now call the same `inspection.complete_file_stdout` implementation.
+A standalone literal `cat` still needs exact stdout equality. A bounded literal
+`pwd`/`ls`/short separator `echo` sequence joined by `&&`, ending in exactly one
+`cat` of the required file, may prove its read only when the complete frozen
+bytes appear as a unique exact output tail. Dynamic syntax, pipes, redirections,
+other content reads, forged echo text, missing/truncated output and business
+calls before the complete observation remain invalid. The general-description /
+topic-body loading policy, 16000-byte package budget and raw-trial checks remain
+unchanged. This is a new verifier version; old runs and old audit conclusions
+are retained rather than rewritten as originally passing.
+
+Case statements also remind evaluation workers to preserve the exact native
+`test_agent_id` case when resolving `STATE` through the shared evaluation
+protocol. No new archive builder or experiment scheduler is introduced.
