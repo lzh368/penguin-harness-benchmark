@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 import acceptance
+import injection
 import protocol
 import test_registration
 import test_protocol
@@ -66,7 +67,7 @@ def write_trial(benchmark, cell, frozen, runtime, selected=None):
     def pair(key, tool, args, output):
         rows.extend([{"type": "model_msg", "payload": {"type": "tool_call", "name": tool,
             "arguments": json.dumps(args), "tool_call_id": key}}, {"type": "model_msg", "payload": {
-            "type": "tool_call_output", "tool_call_id": key, "output": output}}])
+            "type": "tool_call_output", "tool_call_id": key, "output": output, "stop_reason": "completed"}}])
     slot = acceptance.SLOT
     for name in ("SKILL.md", "index.json"):
         raw = frozen[slot + "/" + name]
@@ -124,6 +125,31 @@ class InjectionTests(unittest.TestCase):
             "snapshot": str(self.snapshot), "runtime": self.runtime, "expected_version": 1, "benchmark": str(self.benchmark),
             "config": str(registration.config_path), "config_sha256": protocol.sha(registration.config_path)}
 
+    def replace_library(self, entries, selected=None):
+        save(self.library, entries)
+        shutil.rmtree(self.state / acceptance.SLOT)
+        self.evo.export_skill({"library": str(self.library), "limits": {"general": 5, "topic": 5},
+            "max_entries": 5, "max_bytes": 16000, "output": str(self.state / acceptance.SLOT)})
+        with tarfile.open(self.snapshot, "w:gz") as archive:
+            archive.add(self.state, arcname="agent_state")
+        self.frozen = acceptance.snapshot(self.snapshot)["files"]
+        for cell, (trial, _) in zip(self.cells, self.trials):
+            shutil.rmtree(trial)
+            write_trial(self.benchmark, cell, self.frozen, self.runtime, selected=selected)
+
+    def trace_rows(self):
+        return [json.loads(line) for line in self.trials[0][1].read_text().split("\n") if line]
+
+    def save_rows(self, rows):
+        self.trials[0][1].write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n")
+
+    @staticmethod
+    def extra_pair(rows, name, arguments, output="SYNTHETIC public inspection", key="inspection"):
+        pair = copy.deepcopy(rows[6:8])
+        pair[0]["payload"].update(name=name, arguments=json.dumps(arguments), tool_call_id=key)
+        pair[1]["payload"].update(tool_call_id=key, output=output, stop_reason="completed")
+        return pair
+
     def test_complete_matrix_has_observed_guidance_and_no_test_content_receipt(self):
         result = protocol.execute(self.req)
         self.assertTrue(result["complete"])
@@ -136,6 +162,152 @@ class InjectionTests(unittest.TestCase):
             shutil.rmtree(trial)
             write_trial(self.benchmark, cell, self.frozen, self.runtime, selected=[])
         self.assertTrue(all(cell["bytes"] == 0 for cell in protocol.execute(self.req)["cells"]))
+
+    def test_real_h0_readonly_directory_and_public_document_combinations(self):
+        self.replace_library([])
+        rows = self.trace_rows()
+        for command in ("ls -la /app/input/payloads/ && ls -la /app",
+                        "ls -R /app/input /app; cat /app/environment_access.md 2>/dev/null || cat /app/input/environment_access.md"):
+            with self.subTest(command=command):
+                pair = self.extra_pair(rows, "exec_command", {"cmd": command})
+                self.save_rows([*rows[:6], *pair, *rows[6:]])
+                result = protocol.execute(self.req)
+                self.assertTrue(result["complete"])
+                self.assertTrue(all(cell["bytes"] == 0 for cell in result["cells"]))
+
+    def test_real_final_discovery_pipeline_and_literal_echo_separator(self):
+        rows = self.trace_rows()
+        pair = self.extra_pair(rows, "exec_command", {
+            "cmd": "find /app/input -type f | head -50; echo ---; ls -la /app"})
+        self.save_rows([*rows[:6], *pair, *rows[6:]])
+        self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_real_final_complete_standalone_cat_index_proves_full_read(self):
+        entries = protocol.read(self.library)
+        delta = 2830 - len(self.frozen[acceptance.SLOT + "/index.json"])
+        entries[0]["trigger"] += "a" * (delta // 2)
+        entries[0]["scope"] += "b" * (delta - delta // 2)
+        self.replace_library(entries)
+        raw = self.frozen[acceptance.SLOT + "/index.json"]
+        self.assertEqual(len(raw), 2830)
+        rows = self.trace_rows()
+        target = json.loads(rows[4]["payload"]["arguments"])["file_path"]
+        rows[4]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": "cat " + target}))
+        rows[5]["payload"]["output"] = raw.decode()
+        public = self.extra_pair(rows, "exec_command", {
+            "cmd": "cat /app/environment_access.md; head -n 20 /app/input/prompt.txt"})
+        self.save_rows([*rows[:6], *public, *rows[6:]])
+        self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_standalone_cat_reader_and_index_preserve_unicode_and_newlines(self):
+        entries = protocol.read(self.library)
+        entries[0]["trigger"] = "SYNTHETIC Unicode 中文🙂\u2028trigger"
+        self.replace_library(entries)
+        rows = self.trace_rows()
+        for offset, name in ((2, "SKILL.md"), (4, "index.json")):
+            target = json.loads(rows[offset]["payload"]["arguments"])["file_path"]
+            rows[offset]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": "cat " + target}))
+            rows[offset + 1]["payload"]["output"] = self.frozen[acceptance.SLOT + "/" + name].decode()
+        self.save_rows(rows)
+        self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_cat_read_proof_rejects_wrong_truncated_failed_combined_or_late_output(self):
+        original = self.trace_rows()
+        target = json.loads(original[4]["payload"]["arguments"])["file_path"]
+        raw = self.frozen[acceptance.SLOT + "/index.json"].decode()
+        variants = [
+            ("cat " + target, raw[:-1], "completed", False),
+            ("cat " + target, raw + " ", "completed", False),
+            ("cat " + target, raw[:40] + "[output truncated]", "completed", False),
+            ("cat " + target, raw, "fatal", False),
+            ("cat " + target + "; echo ---", raw, "completed", False),
+            ("head -c 99999 " + target, raw, "completed", False),
+            ("cat " + target + " | head -99999", raw, "completed", False),
+            ("cat " + target + " 2>/dev/null", raw, "completed", False),
+            ("cat " + target, raw, "completed", True),
+        ]
+        for command, output, status, late in variants:
+            with self.subTest(command=command, status=status, late=late, bytes=len(output)):
+                rows = copy.deepcopy(original)
+                rows[4]["payload"].update(name="exec_command", arguments=json.dumps({"cmd": command}))
+                rows[5]["payload"].update(output=output, stop_reason=status)
+                if late:
+                    rows[5], rows[6] = rows[6], rows[5]
+                self.save_rows(rows)
+                with self.assertRaisesRegex(ValueError, "reader/index"):
+                    protocol.execute(self.req)
+
+    def test_single_cat_relative_operand_or_double_dash_proves_exact_file(self):
+        original = self.trace_rows()
+        target = json.loads(original[4]["payload"]["arguments"])["file_path"]
+        raw = self.frozen[acceptance.SLOT + "/index.json"].decode()
+        for arguments in ({"cmd": "cat index.json", "workdir": target.rsplit("/", 1)[0]},
+                          {"cmd": "cat -- " + target},
+                          {"cmd": "cat -- index.json", "workdir": target.rsplit("/", 1)[0]}):
+            with self.subTest(arguments=arguments):
+                rows = copy.deepcopy(original)
+                rows[4]["payload"].update(name="exec_command", arguments=json.dumps(arguments))
+                rows[5]["payload"].update(output=raw, stop_reason="completed")
+                self.save_rows(rows)
+                self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_entry_body_reads_cannot_precede_the_complete_selector(self):
+        rows = self.trace_rows()
+        state = rows[0]["payload"]["agent_state"]
+        target = state + "/" + acceptance.SLOT + "/general/fixture-guide.md"
+        for name, arguments in (("read_file", {"file_path": target}),
+                                ("exec_command", {"cmd": "cat " + target}),
+                                ("exec_command", {"cmd": "head -n 1 " + target})):
+            with self.subTest(tool=name, arguments=arguments):
+                pair = self.extra_pair(rows, name, arguments)
+                self.save_rows([*rows[:6], *pair, *rows[6:]])
+                with self.assertRaisesRegex(ValueError, "entry"):
+                    protocol.execute(self.req)
+
+    def test_unselected_cat_head_and_mixed_commands_cannot_bypass_budget_after_selection(self):
+        self.replace_library(protocol.read(self.library), selected=[])
+        rows = self.trace_rows()
+        slot = rows[0]["payload"]["agent_state"] + "/" + acceptance.SLOT
+        for arguments in ({"cmd": "cat " + slot + "/general/fixture-guide.md"},
+                          {"cmd": "head -1 " + slot + "/general/fixture-guide.md"},
+                          {"cmd": "cat general/fixture-guide.md", "workdir": slot},
+                          {"cmd": "cat " + slot + "/general/fixture-guide.md; curl http://business.invalid"},
+                          {"cmd": "cat -n " + slot + "/general/fixture-guide.md"},
+                          {"cmd": "head --verbose " + slot + "/general/fixture-guide.md"},
+                          {"cmd": "cat " + slot + "/general/fixture-guide.md; echo \"$PATH\""},
+                          {"cmd": "cat " + slot + "/general/fixture-guide.md; python3 -c 'print(1)'"},
+                          {"cmd": "head -1 " + slot + "/general/fixture-guide.md; echo '{}'"},
+                          {"cmd": "cat " + slot + "/general/fixture-guide.md > /tmp/copied.txt"},
+                          {"cmd": "cat " + slot + "/general/fixture-guide.md>/tmp/copied.txt"},
+                          {"cmd": "# read the existing file\ncat " + slot + "/general/fixture-guide.md"},
+                          {"cmd": "/bin/cat " + slot + "/general/fixture-guide.md"},
+                          {"cmd": "cd " + slot + " && cat general/fixture-guide.md"}):
+            with self.subTest(arguments=arguments):
+                pair = self.extra_pair(rows, "exec_command", arguments)
+                self.save_rows([*rows, *pair])
+                with self.assertRaisesRegex(ValueError, "entry"):
+                    protocol.execute(self.req)
+
+    def test_post_selection_path_text_is_not_misclassified_as_an_entry_read(self):
+        self.replace_library(protocol.read(self.library), selected=[])
+        rows = self.trace_rows()
+        slot = rows[0]["payload"]["agent_state"] + "/" + acceptance.SLOT
+        for arguments in ({"cmd": "python3 -c 'print({\"source\": \"" + slot + "/general/fixture-guide.md\"})'"},
+                          {"cmd": "echo 'Documentation mentions " + slot + "/general/fixture-guide.md'"},
+                          {"cmd": "python3 -c 'print(\"text; cat " + slot + "/general/fixture-guide.md\")'"},
+                          {"cmd": "echo 'text; cat " + slot + "/general/fixture-guide.md'"},
+                          {"cmd": "echo text # ; cat " + slot + "/general/fixture-guide.md"}):
+            with self.subTest(arguments=arguments):
+                pair = self.extra_pair(rows, "exec_command", arguments)
+                self.save_rows([*rows, *pair])
+                self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_selected_entry_reread_after_selection_does_not_expand_budget(self):
+        rows = self.trace_rows()
+        target = rows[0]["payload"]["agent_state"] + "/" + acceptance.SLOT + "/general/fixture-guide.md"
+        pair = self.extra_pair(rows, "exec_command", {"cmd": "cat " + target})
+        self.save_rows([*rows, *pair])
+        self.assertTrue(protocol.execute(self.req)["complete"])
 
     def test_disk_install_substitution_and_in_test_state_edit_fail(self):
         for point in ("before", "after"):
@@ -209,6 +381,29 @@ class InjectionTests(unittest.TestCase):
         path.write_text("\n".join(json.dumps(row) for row in rows))
         with self.assertRaisesRegex(ValueError, "observed before selection"):
             protocol.execute(self.req)
+
+    def test_parallel_native_pages_require_the_latest_needed_observation_before_selection(self):
+        original = self.trace_rows()
+        raw = self.frozen[acceptance.SLOT + "/SKILL.md"].decode().split("\n")
+        if raw[-1] == "":
+            raw.pop()
+        split = max(1, len(raw) // 2)
+        first = copy.deepcopy(original[2:4])
+        second = copy.deepcopy(first)
+        for row in second:
+            row["payload"]["tool_call_id"] = "reader-page-2"
+        arguments = json.loads(second[0]["payload"]["arguments"])
+        arguments.update(offset=split + 1, limit=len(raw) - split)
+        second[0]["payload"]["arguments"] = json.dumps(arguments)
+        first[1]["payload"]["output"] = "\n".join(f"{i}\t{line}" for i, line in enumerate(raw[:split], 1))
+        second[1]["payload"]["output"] = "\n".join(f"{i}\t{line}" for i, line in enumerate(raw[split:], split + 1))
+        # Calls are A then B; B's output arrives first. Page A is observed only
+        # after selection, so neither its earlier call nor B's output proves it.
+        self.save_rows([*original[:2], first[0], second[0], second[1], *original[4:], first[1]])
+        with self.assertRaisesRegex(ValueError, "observed before selection"):
+            protocol.execute(self.req)
+        self.save_rows([*original[:2], first[0], second[0], second[1], first[1], *original[4:]])
+        self.assertTrue(protocol.execute(self.req)["complete"])
 
     def test_business_action_must_follow_complete_selector_observation(self):
         path = self.trials[0][1]
@@ -296,6 +491,48 @@ class InjectionTests(unittest.TestCase):
             save(path, record)
             with self.assertRaises(ValueError):
                 protocol.execute(self.req)
+
+
+class ReadonlyShellGrammarTests(unittest.TestCase):
+    slot = "/state/skills/evo-harness-learned"
+
+    def parse(self, command, **options):
+        return injection._readonly_commands({"name": "exec_command", "arguments": json.dumps({"cmd": command, **options})},
+                                            "/app", self.slot)
+
+    def test_limited_literal_public_read_combinations(self):
+        for command in ("pwd; ls -la /app", "cat '/app/input/payloads/a b.txt'",
+                        "cat /app/environment_access.md 2> /dev/null || cat /app/input/environment_access.md",
+                        "cat /app/environment_access.md 2>'/dev/null'",
+                        "head -n 20 /app/input/prompt.txt", "cat /app/input/prompt.txt | head -20",
+                        "find /app/input -maxdepth 2 -type f | head --lines=50; echo ---; ls -R /app",
+                        "ls /app;", "cat -- /app/instruction.md", "ls /",
+                        "ls /state/skills; find /opt -maxdepth 1 -type d",
+                        "find /app/input -name '*.json'", 'find /app/input -iname "*.JSON"',
+                        "find /app/input -name '[ab]*.json' -type f | head -50"):
+            with self.subTest(command=command):
+                self.parse(command)
+
+    def test_side_effects_expansion_nonpublic_reads_and_ambiguous_redirection_fail_closed(self):
+        commands = (
+            "ls -la;curl http://business.invalid", "ls -la&&python3 -c pass", "ls -la>answer.json",
+            "cat /app/input/prompt.txt > /app/submission/answer.json", "cat /app/input/prompt.txt 2>/tmp/error",
+            "cat /app/input/prompt.txt 2>&1", "cat /app/input/prompt.txt 2 > /dev/null",
+            "cat /app/input/prompt.txt '2'>/dev/null", "cat /app/input/prompt.txt &> /dev/null",
+            "cat </app/input/prompt.txt", "cat /app/input/prompt.txt | sh", "echo text | bash",
+            "find /app -delete", "find /app -exec cat /state/entry.md ';'", "find /app -fprint /tmp/x",
+            "ls $(cat /app/input/prompt.txt)", "ls `pwd`", "cat $FILE", "cat /app/input/*",
+            "find /app/input -name *.json", "find /app/input -name foo'*.json'",
+            "find /app/input -name '[ab]*.json'; cat /app/input/*.json", "cat '/app/input/*.json'",
+            "cat /app/input/prompt.txt &", "pwd\nls", "(pwd)", "echo hi;> /tmp/out", "pwd;;ls",
+            "cat /proc/self/environ", "cat /app/submission/answer.json", "cat /app/input/../../state/entry.md",
+            "cat " + self.slot + "/general/entry.md", "head -1 " + self.slot + "/general/entry.md",
+            "find /app | head -1 /state/entry.md", "X=x cat /app/input/prompt.txt")
+        for command in commands:
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                self.parse(command)
+        with self.assertRaises(ValueError):
+            self.parse("cat /app/input/prompt.txt", run_in_background=True)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,8 @@ class ControllerAcceptanceTests(unittest.TestCase):
             "benchmark_id": "synthetic-training-benchmark", "test_benchmark_id": "synthetic-test-benchmark",
             "trainer_agent_id": "synthetic-trainer", "test_agent_id": "synthetic-target",
             "deployment": registration.config["deployment"]}
+        checkout = next(path for path in self.tool.parents if (path / "packages/core/package.json").is_file())
+        self.config["deployment"].update(penguin_checkout=str(checkout), node=shutil.which("node"))
         registration.preflight["pins"]["provider"] = self.runtime["provider"]
         registration.save_preflight()
         self.save(self.config_path, self.config)
@@ -119,6 +121,13 @@ class ControllerAcceptanceTests(unittest.TestCase):
                            "host_cost_status": "pending_final_request"}
         self.save(Path(self.mode["completion_request"]), self.completion)
         self.save(self.scratch / "GOAL.json", {"status": "complete", "ended": False})
+        self.workers = {}
+        # Original native worker results are an independent source of each
+        # matrix cell. They must exist even when no formatting repair was used.
+        self.restore_target(self.h0)
+        for cell in self.cells:
+            self.record_worker("h0", cell)
+        self.restore_target(self.final)
 
     @staticmethod
     def save(path, value):
@@ -135,6 +144,55 @@ class ControllerAcceptanceTests(unittest.TestCase):
             "benchmark_id": self.config["test_benchmark_id"], "test_agent_id": "synthetic-target",
             "case_id": task, "run": 1, "expected_version": version, **self.worker_runtime}.items())
         return {"description": "SYNTHETIC test worker", "prompt": prompt, **self.worker_runtime, "run_in_background": True}
+
+    def restore_target(self, archive):
+        shutil.rmtree(self.target)
+        for name, content in acceptance.snapshot(archive)["files"].items():
+            path = self.target / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+    @staticmethod
+    def append_rows(path, rows):
+        with Path(path).open("a") as handle:
+            handle.write("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+
+    @staticmethod
+    def worker_yaml(cell):
+        return "".join(key + ": " + json.dumps(value, ensure_ascii=False) + "\n" for key, value in cell.items())
+
+    def record_worker(self, phase, cell):
+        index = self.test_cases.index(cell["case_id"])
+        call = self.call(cell["case_id"], cell["expected_version"])
+        ticket = self.control.worker_request({"phase": phase, "call": call}, self.scratch, self.mode)
+        if (phase, cell["case_id"]) in self.workers:
+            return self.workers[phase, cell["case_id"]]
+        call_id = f"synthetic-call-{index}" if phase == "h0" else f"synthetic-final-call-{index}"
+        child_id = f"subagent-synthetic-{phase}-{index}"
+        session_id = f"session-synthetic-worker-{phase}-{index}"
+        self.save(Path(ticket["ticket"]).parent / (self.evo.digest(ticket["slot"].encode()) + ".claimed.json"),
+            {"slot": ticket["slot"], "request_sha256": ticket["request_sha256"], "tool_call_id": call_id})
+        self.append_rows(self.trace, [
+            {"type": "model_msg", "payload": {"type": "tool_call", "name": "run_subagent", "tool_call_id": call_id,
+                "arguments": json.dumps(call, ensure_ascii=False)}},
+            {"type": "event_msg", "payload": {"type": "subagent", "session_id": session_id}},
+            {"type": "model_msg", "payload": {"type": "tool_call_output", "tool_call_id": call_id,
+                "stop_reason": "completed", "output": "[subagent running in background with subagent_id " + child_id + "; completion will arrive]"}},
+            {"type": "model_msg", "payload": {"type": "text", "role": "user", "sender": "harness",
+                "text": "[background_task_done]\nkind: subagent\nid: " + child_id + "\nstatus: completed\n[/background_task_done]"}},
+        ])
+        trace = self.trace.parent / (session_id + "_001.jsonl")
+        self.append_rows(trace, [
+            {"type": "session_meta", "payload": {**self.meta, "source": "subagent", "session_id": session_id}},
+            {"type": "model_msg", "payload": {"type": "text", "role": "user", "sender": "parent_agent",
+                "text": self.evo.native_prompt(call)}},
+            {"type": "event_msg", "payload": {"type": "request_begin", "thinking_level": self.worker_runtime["thinking_level"]}},
+            {"type": "model_msg", "payload": {"type": "text", "role": "assistant", "text": self.worker_yaml(cell)}},
+            {"type": "event_msg", "payload": {"type": "request_end", "status": "completed"}},
+        ])
+        worker = {"trace": trace, "subagent_id": child_id, "session_id": session_id, "ticket": ticket}
+        self.workers[phase, cell["case_id"]] = worker
+        return worker
 
     def test_native_worker_fields_cannot_be_replaced_with_full_frozen_runtime(self):
         self.assertEqual(set(self.identity), {"agent_id", "expected_version", "provider", "model_id", "thinking_level"})
@@ -197,7 +255,7 @@ class ControllerAcceptanceTests(unittest.TestCase):
         wrong = {**self.identity, "model_id": "synthetic-wrong-model"}
         self.save(Path(self.matrix["cells"]), [{**cell, **wrong} for cell in self.cells])
         self.save(self.matrix_path, {**self.matrix, "identity": wrong})
-        with self.assertRaisesRegex(ValueError, "runtime mismatch"):
+        with self.assertRaisesRegex(ValueError, "runtime mismatch|worker result differs"):
             self.control.controller_final(self.mode)
         self.assertEqual(self.hook("stop")["output"]["status"], "method_failed")
         self.assertEqual(protocol.read(self.scratch / "GOAL.json")["status"], "blocked")
@@ -205,6 +263,68 @@ class ControllerAcceptanceTests(unittest.TestCase):
     def test_unknown_final_host_cost_cannot_be_claimed_complete(self):
         self.save(Path(self.mode["completion_request"]), {**self.completion, "host_cost_status": "complete"})
         with self.assertRaisesRegex(ValueError, "pending"):
+            self.control.controller_final(self.mode)
+
+    def test_original_native_worker_plain_document_must_equal_its_matrix_cell(self):
+        worker = self.workers["h0", self.test_cases[0]]
+        trace = worker["trace"]
+        original = trace.read_bytes()
+        cell = self.cells[0]
+        variants = ["```yaml\n" + self.worker_yaml(cell) + "```\n",
+                    "The evaluation is complete.\n" + self.worker_yaml(cell),
+                    self.worker_yaml({**cell, "score": 49}),
+                    self.worker_yaml({key: value for key, value in cell.items() if key != "cost"})]
+        for text in variants:
+            with self.subTest(text_kind=text[:24]):
+                rows = [json.loads(line) for line in original.split(b"\n") if line]
+                next(row["payload"] for row in rows if row.get("payload", {}).get("role") == "assistant")["text"] = text
+                trace.write_bytes(b"")
+                self.append_rows(trace, rows)
+                with self.assertRaises(ValueError):
+                    self.control.controller_final(self.mode)
+        trace.write_bytes(original)
+        self.assertTrue(self.control.controller_final(self.mode)["complete"])
+
+    def test_same_native_worker_may_repair_only_format_without_tools_or_value_changes(self):
+        worker = self.workers["h0", self.test_cases[0]]
+        trace = worker["trace"]
+        rows = [json.loads(line) for line in trace.read_bytes().split(b"\n") if line]
+        answer = next(row["payload"] for row in rows if row.get("payload", {}).get("role") == "assistant")
+        answer["text"] = "```yaml\n" + answer["text"] + "```\n"
+        trace.write_bytes(b"")
+        self.append_rows(trace, rows)
+        request = self.control.format_request({"subagent_id": worker["subagent_id"]}, self.meta, self.scratch, self.mode)
+        self.assertFalse(request["automatic_dispatch"])
+        call_id = "synthetic-format-existing-worker"
+        self.assertEqual(self.hook("pre_tool_use", tool_name="input_subagent",
+            arguments=json.dumps(request["call"]), tool_call_id=call_id), {})
+        self.append_rows(self.trace, [
+            {"type": "model_msg", "payload": {"type": "tool_call", "name": "input_subagent", "tool_call_id": call_id,
+                "arguments": json.dumps(request["call"])}},
+            {"type": "model_msg", "payload": {"type": "tool_call_output", "tool_call_id": call_id,
+                "stop_reason": "completed", "output": "[subagent continues in background]"}},
+            {"type": "model_msg", "payload": {"type": "text", "role": "user", "sender": "harness",
+                "text": "[background_task_done]\nkind: subagent\nid: " + worker["subagent_id"] + "\nstatus: completed\n[/background_task_done]"}},
+        ])
+        repair_rows = [
+            {"type": "model_msg", "payload": {"type": "text", "role": "user", "sender": "parent_agent", "text": self.control.FORMAT_PROMPT}},
+            {"type": "event_msg", "payload": {"type": "request_begin", "thinking_level": self.worker_runtime["thinking_level"]}},
+            {"type": "model_msg", "payload": {"type": "text", "role": "assistant", "text": self.worker_yaml(self.cells[0])}},
+            {"type": "event_msg", "payload": {"type": "request_end", "status": "completed"}},
+        ]
+        self.append_rows(trace, repair_rows)
+        valid = trace.read_bytes()
+        self.assertTrue(self.control.controller_final(self.mode)["complete"])
+        changed = [json.loads(line) for line in valid.split(b"\n") if line]
+        next(row["payload"] for row in reversed(changed) if row.get("payload", {}).get("role") == "assistant")["text"] = self.worker_yaml({**self.cells[0], "score": 51})
+        trace.write_bytes(b"")
+        self.append_rows(trace, changed)
+        with self.assertRaises(ValueError):
+            self.control.controller_final(self.mode)
+        trace.write_bytes(valid)
+        self.append_rows(trace, [{"type": "model_msg", "payload": {"type": "tool_call", "name": "exec_command",
+            "tool_call_id": "forbidden-repair-work", "arguments": json.dumps({"cmd": "echo SYNTHETIC"})}}])
+        with self.assertRaisesRegex(ValueError, "tools"):
             self.control.controller_final(self.mode)
 
     def test_five_failures_reflect_compile_and_two_frozen_matrices_verify_actual_injection(self):
@@ -228,15 +348,10 @@ class ControllerAcceptanceTests(unittest.TestCase):
         # Restore the actual frozen State before each five-cell registration.
         # No worker/model is dispatched by these deterministic ticket checks.
         for phase, archive, version in (("h0", fixture.h0, 1), ("final", fixture.final, 2)):
-            shutil.rmtree(fixture.target)
-            for name, content in acceptance.snapshot(archive)["files"].items():
-                path = fixture.target / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(content)
-            for case in fixture.test_cases:
-                ticket = fixture.control.worker_request({"phase": phase, "call": fixture.call(case, version)},
-                                                       fixture.scratch, fixture.mode)
-                self.assertFalse(ticket["dispatched"])
+            fixture.restore_target(archive)
+            for cell in fixture.cells if phase == "h0" else final_cells:
+                worker = fixture.record_worker(phase, cell)
+                self.assertFalse(worker["ticket"]["dispatched"])
         evaluations = [protocol.matrix(req)["evaluation"]
                        for req in (fixture.matrix, protocol.read(final_matrix))]
         self.assertEqual([entry["version"] for entry in evaluations], [1, 2])

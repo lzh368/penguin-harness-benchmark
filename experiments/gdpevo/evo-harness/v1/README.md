@@ -191,7 +191,13 @@ is then byte-idempotent. All three complete State maps must equal the frozen
 snapshot; there is no blanket startup-rewrite exemption. Vault, memory and
 schedules are not read or retained by this inventory.
 The audit then checks the original test Session's full reader/index reads and
-one canonical selector stdout against the frozen package. Empty H0 and a
+one canonical selector stdout against the frozen package. Complete native
+read_file observations and a foreground single-file cat whose original stdout
+exactly matches the frozen bytes both prove a reader/index read. Before selection,
+only a conservatively parsed subset of read-only public-file/directory inspection
+is accepted; arbitrary code, APIs, task execution, file writes and entry-body
+reads remain forbidden. Shell syntax is never treated as proof of arbitrary code
+being harmless. Empty H0 and a
 nonempty library with no relevant entries both permit `selected: []`; neither
 permits skipping the reader/selector. Missing method evidence blocks completion
 without deleting or changing the original verifier's score. Unknown cost stays
