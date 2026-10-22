@@ -90,7 +90,8 @@ class RecompileTests(unittest.TestCase):
         self.assertEqual(session,'child');self.assertEqual(len(view['sources']),2);self.assertEqual(len(view['pairs']),1)
         self.assertEqual(view['binding']['parent_trace'],str(parent))
         rows=[json.loads(line)for line in parent.read_text().splitlines()]
-        actual={**call,'description':'原生显示标签','description_note':'display only','yield_time_ms':1000}
+        actual={**call,'description':'原生显示标签','description_note':'display only',
+                'description_note_placeholder':'ignored by frozen native tool','yield_time_ms':1000}
         rows[1]['payload']['arguments']=json.dumps(actual);write_rows(parent,rows)
         self.assertEqual(recompile_tools.original_child(m,self.evo,self.control)[0],'child')
         for key,value in [('prompt_sha256','0'*64),('thinking_level','low'),('agent_id','other'),('model_id','wrong')]:

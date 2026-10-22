@@ -80,8 +80,12 @@ def original_child(m, evo, control):
     # The frozen native runtime records parentage in the parent's subagent event,
     # not a parent_trace field on child session_meta. Bind that event to the
     # completed dispatch call, rather than inventing or rewriting child metadata.
-    inert = {'description', 'description_note', 'yield_time_ms'}
-    semantic = lambda value: {k: v for k, v in value.items() if k not in inert}
+    # These are the arguments consumed by frozen 11d82df run-subagent.ts which
+    # affect child identity/input or execution. Descriptions and arbitrary UI
+    # annotations are not consumed; yield_time_ms only changes the wait window.
+    functional = {'prompt', 'prompt_file', 'prompt_sha256', 'agent_id',
+                  'provider', 'model_id', 'thinking_level', 'run_in_background'}
+    semantic = lambda value: {k: v for k, v in value.items() if k in functional}
     links = []
     for parent in sorted(root.rglob(launch['sessionId'] + '*.jsonl')):
         parent_rows = [json.loads(line) for line in parent.read_text().splitlines() if line]
