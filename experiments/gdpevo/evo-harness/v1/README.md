@@ -408,3 +408,15 @@ are retained rather than rewritten as originally passing.
 Case statements also remind evaluation workers to preserve the exact native
 `test_agent_id` case when resolving `STATE` through the shared evaluation
 protocol. No new archive builder or experiment scheduler is introduced.
+
+Revision `2026.10.22.8` preserves native orchestration and Evo learning, while
+correcting the delivered Evolver description contract: general descriptions
+are self-contained method summaries; only topic bodies are fully loaded.
+The fixed GDPevo Reader generates exact native read_file calls for every topic
+page, included in the same 16,000-byte package budget. They are a read plan,
+not a selector or executable loader. The native AGENTS.md is an explicitly
+allowed State instruction; one initial literal public/workspace cd with &&
+and the fixed public JSON display loop are preparation operations. Business
+APIs and writes still require all required Skill observations first. These
+are recorded protocol extensions, not retroactive passes for .6/.7 evidence.
+Old018's business call before both topic observations remains invalid.

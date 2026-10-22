@@ -152,6 +152,71 @@ class InjectionTests(unittest.TestCase):
     def skill_raw(self):
         return self.frozen[acceptance.SLOT + "/SKILL.md"]
 
+    def test_018_ordinary_preparation_and_native_instructions_are_not_business(self):
+        original = self.trace_rows()
+        state = original[0]["payload"]["agent_state"]
+        commands = [
+            "cd /app && cat input/prompt.txt && echo \"=== FILES ===\" && find input/payloads -type f | sort && echo \"=== ENV ===\" && cat environment_access.md",
+            "ls -R " + state + "/skills | head -60; echo ---; cat " + state + "/AGENTS.md",
+            'cd input/payloads && for f in *.json; do echo "=== $f ==="; cat "$f"; echo; done',
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.save_rows(original[:2] + self.extra_pair(original, "exec_command", {"cmd": command}) + original[2:])
+                self.assertTrue(protocol.execute(self.req)["complete"])
+        self.save_rows(original[:2] + self.extra_pair(original, "read_file", {"file_path": state + "/AGENTS.md"}) + original[2:])
+        self.assertTrue(protocol.execute(self.req)["complete"])
+
+    def test_005_initial_cd_and_public_listing_are_only_preparation(self):
+        original = self.trace_rows()
+        for command in ("cd /app", "cd /app && ls -la", "cd input/payloads && ls -la", "cd /app && ls input"):
+            with self.subTest(command=command):
+                self.save_rows(original[:2] + self.extra_pair(original, "exec_command", {"cmd": command}) + original[2:])
+                result = protocol.execute(self.req)
+                self.assertTrue(result["complete"])
+                # The preparation did not stand in for the required Reader/topic observations.
+                self.assertEqual(len(result["cells"][0]["file_read_observed_positions"]), 2)
+        # Listing a file name never supplies that file's complete contents.
+        self.save_rows(original[:2] + self.extra_pair(original, "exec_command", {"cmd": "cd /app && ls -la"}) + original[4:])
+        with self.assertRaisesRegex(ValueError, "Skill not fully observed"):
+            protocol.execute(self.req)
+
+    def test_010_preparation_is_bound_to_own_native_instructions_not_training_material(self):
+        original = self.trace_rows()
+        state = original[0]["payload"]["agent_state"]
+        for tool, args in (("read_file", {"file_path": state + "/AGENTS.md"}),
+                           ("exec_command", {"cmd": "cd /app && cat " + state + "/AGENTS.md"})):
+            self.save_rows(original[:2] + self.extra_pair(original, tool, args) + original[2:])
+            self.assertTrue(protocol.execute(self.req)["complete"])
+        # Training's own-profile grant is not inherited by a held-out test.
+        denied = [state + "/skills/evo-harness-rsi-toolkit/training.json",
+                  state.replace("/default_agent/", "/other_agent/") + "/AGENTS.md",
+                  "/app/train_tasks/train_002/input/prompt.txt", "/tests/test_outputs.py",
+                  "/logs/verifier/reward.json", state + "/memory/private.md"]
+        for path in denied:
+            for tool, args in (("read_file", {"file_path": path}),
+                               ("exec_command", {"cmd": "cd /app && cat " + path})):
+                with self.subTest(path=path, tool=tool):
+                    self.save_rows(original[:2] + self.extra_pair(original, tool, args) + original[2:])
+                    with self.assertRaises(ValueError):
+                        protocol.execute(self.req)
+
+    def test_018_business_after_reader_but_before_topic_body_still_invalid(self):
+        rows = self.trace_rows()
+        command = 'cd /app && for e in jurisdictions cases charges; do curl -s "http://127.0.0.1:9018/api/$e"; done'
+        self.save_rows(rows[:4] + self.extra_pair(rows, "exec_command", {"cmd": command}) + rows[4:])
+        with self.assertRaises(ValueError):
+            protocol.execute(self.req)
+
+    def test_general_body_read_via_literal_cd_is_still_rejected(self):
+        rows = self.trace_rows(); state = rows[0]["payload"]["agent_state"]
+        _, _, forbidden = injection.loading_files(self.frozen, self.evo, acceptance)
+        path = sorted(forbidden)[0]
+        command = "cd " + state + "/" + str(Path(path).parent) + " && cat SKILL.md"
+        self.save_rows(rows[:-2] + self.extra_pair(rows, "exec_command", {"cmd": command}) + rows[-2:])
+        with self.assertRaisesRegex(ValueError, "general Skill body"):
+            protocol.execute(self.req)
+
     def test_complete_matrix_binds_every_case_to_identical_full_skill_bytes(self):
         result = protocol.execute(self.req)
         self.assertTrue(result["complete"])

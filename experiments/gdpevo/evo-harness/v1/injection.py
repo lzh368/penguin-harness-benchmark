@@ -83,6 +83,9 @@ def reject_general_body_reads(pairs, forbidden, workspace, inspection):
                 continue
             for command in commands:
                 argv = command["argv"]
+                if argv[0] == "cd" and len(argv) == 2:
+                    workdir = inspection._path(argv[1], workdir)
+                    continue
                 if argv[0] not in ("cat", "head"):
                     continue
                 paths = [inspection._path(value, workdir) for value in inspection._file_operands(argv)]
@@ -233,7 +236,7 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
         if call.get("name") == "read_file":
             args = json.loads(call["arguments"])
             path = inspection._path(args.get("file_path"), meta["workspace"])
-            require(path in skill_files or inspection._public_file(path, meta["workspace"]),
+            require(path in skill_files or path == inspection.native_instructions(slot) or inspection._public_file(path, meta["workspace"]),
                     "nonpublic read preceded the complete Skill observation")
             continue
         require(call.get("name") == "exec_command", "task action occurred before complete Skill observation")
