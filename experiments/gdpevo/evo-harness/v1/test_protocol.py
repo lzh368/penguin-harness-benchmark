@@ -175,6 +175,11 @@ class ProtocolTests(unittest.TestCase):
                 self.assertFalse(trainer.exists())
         skill_file.write_bytes(skill_before)
         config_file.write_bytes(config_before)
+        with self.assertRaisesRegex(ValueError, "H0 native context"):
+            protocol.prepare_trainer(request)
+        self.assertFalse(trainer.exists())
+        config_file.write_bytes(config_before + b"system_prompt: '{{AGENTS_MD}}'\n")
+        evo.install_context({"state": str(base)})
         prepared = protocol.prepare_trainer(request)
         self.assertEqual(prepared["training"]["max_bytes"], 16000)
         self.assertEqual(prepared["training"]["injection_mode"], "full_skill")

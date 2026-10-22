@@ -43,6 +43,9 @@ def helper(path):
 
 def validate_config(config, repo):
     require(config["protocol"] == "evo-harness-gdpevo-v1", "unknown protocol")
+    if config["versions"]["skill"] == "2026.10.22.12":
+        require(config.get("context_transport") == "agents-md-v1" and config.get("reflection_evidence") == "observed-v1"
+                and config.get("receipt_policy") == "native-trial-v1", "new method requires its explicit protocol revision")
     group = config["group"]
     require(group in ("003", "005", "010", "014", "018", "024"), "unsupported group")
     require(config["train_ids"] == [f"train_{i:03d}" for i in range(1, 6)], "requires all five train members")
@@ -105,6 +108,15 @@ def prepare_trainer(req):
     acceptance.verify_skill_budget(base_package)
     acceptance.verify_output_budget(
         (base / "system_config.yaml").read_bytes(), base_package["max_bytes"])
+    if config.get("context_transport") == "agents-md-v1":
+        base_files = {name: (base / name).read_bytes() for name in files}
+        context = evo.model_context(acceptance.package_files_from_state(base_files, evo))
+        _, installed = evo.split_context(base_files["AGENTS.md"].decode())
+        require(b"{{AGENTS_MD}}" in base_files["system_config.yaml"]
+                and re.search(rb"(?m)^skills:\n  enabled: false$", base_files["system_config.yaml"]) and installed == context["block"],
+                "H0 native context missing/mismatched: before snapshotting, run the installed evo.py with "
+                + json.dumps({"op": "install-context", "state": str(base)})
+                + "; preserve the native AGENTS_MD system template")
     skill = Path(req["method_skill"])
     require(skill.is_dir() and not skill.is_symlink(), "method Skill missing")
     evo.filemap(skill)
@@ -148,6 +160,9 @@ def prepare_trainer(req):
                     "host_operation_id": req["host_operation_id"], "config_sha256": req["config_sha256"],
                     "compilation_reserve_sec": config["compilation_reserve_sec"],
                     "solving_timeout_sec": checked["tasks"][0]["solving_timeout_sec"]}
+        for key in ("context_transport", "reflection_evidence", "receipt_policy"):
+            if key in config:
+                training[key] = config[key]
         require(training["compilation_reserve_sec"] < training["solving_timeout_sec"], "invalid compilation reserve")
         dump(installed / "training.json", training)
         with (stage / "AGENTS.md").open("a") as handle:
@@ -156,7 +171,7 @@ def prepare_trainer(req):
                          "in full; use five native Solver children in the frozen training.json order, then one independent Evolver. "
                          "Each original Solver keeps its native conversation for answer, one judge, full authorized feedback "
                          "observation and negative-feedback reflection; never create a separate Reflector or steer the child. "
-                         "After judging, preserve the answer and stop business queries; write only candidates and seal evidence. "
+                         "After judging, preserve the answer and stop business queries; use existing history or the bound reflection-evidence entry for already observed data, then write candidates and seal. "
                          "Do not solve tasks or call judge in the coordinator. Each Solver has exactly one judged attempt; "
                          "zero candidates still requires an Evolver, compilation and a valid training-export.json. "
                          "A child without run_subagent follows only its full assigned role; do not recurse. "

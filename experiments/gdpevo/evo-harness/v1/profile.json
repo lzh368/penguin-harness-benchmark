@@ -40,7 +40,7 @@
   "paid_authorized": false,
   "budget_usd": null,
   "versions": {
-    "skill": "2026.10.22.10",
+    "skill": "2026.10.22.12",
     "penguin_base": "8aa761232bf6a0463c9131cc3cc93038927099ed",
     "benchmark_base": "893563466fd1a860da4e42270b8e30dfd67f2d40",
     "gdpevo_source": "56d60ae4ae5e067d1ec0ee1f850622e69f422179",
@@ -53,5 +53,8 @@
     "independent native Skills; all same-group topic bodies and all general descriptions, no selector",
     "whole-package UTF-8 byte budget",
     "Penguin configured model instead of Bedrock default"
-  ]
+  ],
+  "context_transport": "agents-md-v1",
+  "reflection_evidence": "observed-v1",
+  "receipt_policy": "native-trial-v1"
 }

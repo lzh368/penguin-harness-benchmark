@@ -1,0 +1,22 @@
+{
+  "synthetic": false,
+  "scope": "Metadata-only regression from existing runs; no answers or test error feedback",
+  "sources": [
+    {
+      "run": "tg014-v22-r1",
+      "raw_result_sha256": "90bc6f4c2b01e2d0d2b6fd42481ea0d7986305826bebb47d1ca0eb2d74c30431",
+      "reported_thinking": "medium",
+      "actual_cli_thinking": "xhigh",
+      "actual_metadata_thinking": "xhigh",
+      "same_installed_state": true
+    },
+    {
+      "run": "tg005-v22-r1",
+      "raw_result_sha256": "c0c55bf87569c6c9ad59b9e2639ea5dab58aba2551e8fdcc69b1d71b387980ea",
+      "reported_thinking": "medium",
+      "actual_cli_thinking": "xhigh",
+      "actual_metadata_thinking": "xhigh",
+      "same_installed_state": true
+    }
+  ]
+}

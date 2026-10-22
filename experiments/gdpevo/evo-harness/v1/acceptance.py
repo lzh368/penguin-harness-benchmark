@@ -223,9 +223,19 @@ def verify_freeze(req, verify_export, evo):
         verify_output_budget(state["files"]["system_config.yaml"], h0_skill["max_bytes"])
     require(h0_skill["max_bytes"] == final_skill["max_bytes"],
             "complete Skill byte budget must remain frozen between H0 and final")
+    automatic = req.get("context_transport") == "agents-md-v1"
+    if automatic:
+        profile_path = Path(export_req["private_learning"]) / "frozen-training.json"
+        require(read(profile_path).get("context_transport") == "agents-md-v1", "context transport differs from frozen training")
+        for state in (h0, final):
+            files = state["files"]
+            require(b"{{AGENTS_MD}}" in files["system_config.yaml"] and re.search(rb"(?m)^skills:\n  enabled: false$", files["system_config.yaml"]), "native context requires AGENTS_MD and disabled duplicate Skill metadata index")
+            context = evo.model_context(package_files_from_state(files, evo))
+            _, installed = evo.split_context(files["AGENTS.md"].decode())
+            require(installed == context["block"], "State context is not the complete deterministic frozen Skill")
     def outside_slot(files):
-        return {name: raw for name, raw in files.items()
-                if name != "system_config.yaml" and not learned_state_file(name)}
+        return {name: (evo.split_context(raw.decode())[0].encode() if automatic and name == "AGENTS.md" else raw)
+                for name, raw in files.items() if name != "system_config.yaml" and not learned_state_file(name)}
     require(h0_config == final_config and outside_slot(h0["files"]) == outside_slot(final["files"]),
             "State changed outside learned slot and top-level version")
     equivalent = h0_package == final_package

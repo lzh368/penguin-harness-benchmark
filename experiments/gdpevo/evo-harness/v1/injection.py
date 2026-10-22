@@ -100,9 +100,12 @@ def reject_general_body_reads(pairs, forbidden, workspace, inspection):
 def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_policy="strict"):
     require(audit_policy in ("strict", "record-only"), "unknown trial audit policy")
     diagnostic = audit_policy == "record-only"
-    require(not diagnostic or (config.get("protocol") == "evo-harness-offline-replay-v1"
-            and config.get("audit_policy") == "record-only" and config["versions"]["skill"] == "2026.10.22.10"),
-            "record-only requires the new explicitly frozen replay method")
+    replay_policy = (config.get("protocol") == "evo-harness-offline-replay-v1"
+            and config.get("audit_policy") == "record-only" and config["versions"]["skill"] == "2026.10.22.10")
+    full_policy = (config.get("protocol") == "evo-harness-gdpevo-v1"
+            and config.get("receipt_policy") == "native-trial-v1" and config["versions"]["skill"] == "2026.10.22.12")
+    require(not diagnostic or replay_policy or full_policy,
+            "record-only requires an explicitly frozen diagnostic policy")
     audit_issues = []
     def audit(condition, code, message, status="failed"):
         if condition:
@@ -187,15 +190,15 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_p
     if usage:
         require(set(usage) == {runtime["provider"] + "/" + runtime["model_id"]},
                 "actual trial model usage differs from frozen runtime")
-    require(metadata["provider"] == runtime["provider"] and metadata["model_id"] == runtime["model_id"]
-            and metadata["thinking"] == runtime["thinking_level"], "trial runtime differs from frozen runtime")
+    recorded_fields(metadata, {"provider": runtime["provider"], "model_id": runtime["model_id"],
+                    "thinking": runtime["thinking_level"]}, "trial runtime differs from frozen runtime")
     require(metadata["agent_state"] == "custom" and metadata.get("requests", 1) > 0, "trial did not run the assigned custom State")
     recorded_fields(metadata, {"native_sessions_idle": True, "process_cleanup": "server_shutdown"},
                     "trial cleanup evidence incomplete")
     reward = result["verifier_result"]["rewards"]["reward"]
     evo.finite(reward, high=1)
     require(abs(cell["score"] - round(reward * 100, 2)) <= 1e-8, "cell score differs from original verifier")
-    actual_cost = result["agent_result"]["cost_usd"]
+    actual_cost = result["agent_result"].get("cost_usd")
     require(cell["cost"] is None if actual_cost is None else cell["cost"] is not None
             and abs(cell["cost"] - actual_cost) <= 0.000001, "cell cost differs from native trial")
     timing = result["agent_execution"]
@@ -282,7 +285,18 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_p
     reject_general_body_reads([(call, outputs.get(key, {})) for key, call in calls.items()],
                               forbidden, meta["workspace"], inspection)
     observed = {}
+    automatic = config.get("context_transport") == "agents-md-v1"
+    context_receipt = None
+    if automatic:
+        package_files = acceptance.package_files_from_state(frozen, evo)
+        try:
+            context_receipt = evo.context_observation(metas, package_files)
+            observed = {path: -1 for path in skill_files}
+        except evo.IncompleteContextObservation as exc:
+            audit(False, "incomplete_skill_observation", str(exc), "pending")
     for path, raw in skill_files.items():
+        if automatic:
+            continue
         try:
             observed[path] = _native_read(pairs, path, raw, meta["workspace"], slot, inspection,
                                           skill_files=set(skill_files))
@@ -346,7 +360,44 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_p
         result.update(audit_policy=audit_policy, audit_status=status, audit_passed=not audit_issues,
                       audit_issues=audit_issues, diagnostic_only=True,
                       required_skill_files={name: digest(raw) for name, raw in required_files.items()})
+    if automatic:
+        result.update(context_transport="agents-md-v1", model_context=context_receipt)
     return result
+
+
+def canonical_worker_cell(req, evo, acceptance):
+    """Derive a cell from one worker-bound, terminal original trial, never a plan.
+
+    Wrong runtime/State is still rejected by _trial. Missing audit observations
+    remain diagnostic; the original worker reply is preserved by the caller.
+    """
+    identity, launch, config = req["identity"], req["launch"], req["config_value"]
+    name = req["session_id"]
+    require(isinstance(name, str) and name.startswith("harbor:")
+            and re.fullmatch(r"[A-Za-z0-9_.-]+", name[7:]), "original worker must bind one Harbor trial")
+    jobs = Path(req["benchmark"]) / ".jobs"
+    matches = list(jobs.glob("*/" + name[7:]))
+    require(len(matches) == 1 and matches[0].resolve().is_relative_to(jobs.resolve())
+            and not matches[0].is_symlink(), "worker Harbor trial missing or ambiguous")
+    trial = matches[0]
+    if not (trial / "result.json").exists():
+        return {"pending": True, "reason": "original Harbor trial has not finished; await it without redispatch"}
+    result = read(trial / "result.json")
+    if not result.get("finished_at"):
+        return {"pending": True, "reason": "original Harbor trial is still running"}
+    frozen = acceptance.snapshot(req["snapshot"])["files"]
+    require(acceptance.config_version(frozen["system_config.yaml"])[0] == identity["expected_version"], "actual frozen version mismatch")
+    reward = result["verifier_result"]["rewards"]["reward"]
+    evo.finite(reward, high=1)
+    timing = result["agent_execution"]
+    duration = (datetime.fromisoformat(timing["finished_at"].replace("Z", "+00:00"))
+                - datetime.fromisoformat(timing["started_at"].replace("Z", "+00:00"))).total_seconds() * 1000
+    actual = result["agent_result"]
+    cell = {"protocol_version": 1, "status": "ok", **identity, "score": round(reward * 100, 2),
+            "cost": actual.get("cost_usd"), "duration_ms": round(duration), "session_id": name}
+    audit = _trial(trial, cell, frozen, req, evo, acceptance, launch, config, audit_policy="record-only" if config.get("receipt_policy") == "native-trial-v1" else "strict")
+    return {"pending": False, "cell": cell, "audit": audit, "trial": str(trial),
+            "raw_result_sha256": digest((trial / "result.json").read_bytes())}
 
 
 def verify_matrix(req, matrix, acceptance, evo, registration, validate_config):
@@ -384,12 +435,13 @@ def verify_matrix(req, matrix, acceptance, evo, registration, validate_config):
                 "test trial identity missing or ambiguous")
         launch = read(Path(req["benchmark"]) / cell["case_id"] / "statement/harbor-launch.json")
         require(launch["task_id"] == registered["test"]["case_to_task"][cell["case_id"]], "registered task mapping changed")
-        receipts.append(_trial(trials[name][0], cell, frozen, req, evo, acceptance, launch, config))
+        receipts.append(_trial(trials[name][0], cell, frozen, req, evo, acceptance, launch, config,
+            audit_policy="record-only" if config.get("receipt_policy") == "native-trial-v1" else "strict"))
     return {"schema": "evo-injection-matrix-v3", "injection_mode": "full_skill",
             "skill_sha256": package["sha256"], "skill_bytes": sum(map(len, skill_files.values())),
             "skill_files": {name: digest(raw) for name, raw in skill_files.items()},
             "loading_policy": "official-cl-context-body-general-description",
             "loaded_skill_files": {name: digest(raw) for name, raw in required_files.items()},
             "loaded_skill_bytes": sum(map(len, required_files.values())),
-            "complete": True, "cells": receipts,
+            "complete": all(r.get("audit_passed", True) for r in receipts), "measurement_complete": True, "cells": receipts,
             "runtime": req["runtime"], "snapshot_sha256": digest(Path(req["snapshot"]).read_bytes()), "model_calls": 0}
