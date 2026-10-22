@@ -20,7 +20,7 @@ SOURCE = os.environ.get("PENGUIN_NATIVE_READY_CHECKOUT")
 
 @unittest.skipUnless(SOURCE and shutil.which("node"), "compiled native checkout opt-in required")
 class NativeReadinessTests(unittest.TestCase):
-    def test_fresh_root_and_old_token_restart_use_single_put_and_mock_task(self):
+    def test_fresh_root_and_old_token_restart_avoid_redundant_put_and_mock_task(self):
         cli = Path(SOURCE).resolve()/"packages/cli/dist/penguin.js"
         self.assertTrue(cli.is_file(), "build the native CLI first")
         with tempfile.TemporaryDirectory(prefix="evo-native-ready-") as temporary:
@@ -92,12 +92,19 @@ else:
                     self.assertFalse(any(event.get("blocked") for event in events))
                     writes=[event for event in events if event['method']=="PUT"]
                     config="/api/projects/default_project/agents/default_agent/config"
-                    self.assertEqual(writes,[{'method':'PUT','path':config,'status':200}])
+                    expected_write={'method':'PUT','path':config,'status':200}
+                    self.assertIn(writes,[[],[expected_write]])
+                    if attempt == "restart_with_old_token": self.assertEqual(writes,[])
                     task_positions=[i for i,e in enumerate(events) if e['method']=="MOCK_TASK"]
                     self.assertEqual(len(task_positions),1)
-                    put_position=next(i for i,e in enumerate(events) if e['method']=="PUT")
-                    self.assertTrue(any(e['method']=="GET" and e['path']==config and e['status']==200 for e in events[:put_position]))
-                    self.assertTrue(any(e['method']=="GET" and e['path']==config and e['status']==200 for e in events[put_position+1:task_positions[0]]))
+                    self.assertTrue(any(e['method']=="GET" and e['path']==config and e['status']==200 for e in events[:task_positions[0]]))
+                    if writes:
+                        put_position=next(i for i,e in enumerate(events) if e['method']=="PUT")
+                        self.assertTrue(any(e['method']=="GET" and e['path']==config and e['status']==200 for e in events[:put_position]))
+                        self.assertTrue(any(e['method']=="GET" and e['path']==config and e['status']==200 for e in events[put_position+1:task_positions[0]]))
+                    cap=json.loads((logs/"penguin/max-turns.json").read_text())
+                    self.assertEqual(cap['max_turns'],-1)
+                    self.assertEqual(cap['changed'],bool(writes))
                     ready=json.loads((logs/"penguin/server-ready.json").read_text())
                     self.assertTrue(ready['ready'])
                     self.assertEqual(ready['stage'],'agent_config')

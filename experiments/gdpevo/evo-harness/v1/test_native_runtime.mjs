@@ -1,7 +1,7 @@
 // Real compiled SDK + native Environment, synthetic content, no model call.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 if (process.argv.length !== 4)
   throw new Error(
@@ -15,16 +15,16 @@ const benchmark = path.resolve(here, "../../../..");
 const core = await import(
   pathToFileURL(path.join(built, "packages/core/dist/index.js"))
 );
-const { parseDocument } = await import(
-  pathToFileURL(
-    path.join(built, "packages/server/node_modules/yaml/dist/index.js"),
-  )
-);
-let modelCalls = 0,
-  networkCalls = 0;
-globalThis.fetch = async () => {
-  networkCalls++;
-  throw new Error("model-free probe forbids fetch");
+let modelCalls = 0, networkCalls = 0, localApiCalls = 0;
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (url, options = {}) => {
+  const target = new URL(url);
+  if (!["127.0.0.1", "localhost"].includes(target.hostname) || !["GET", "PUT"].includes(options.method || "GET")) {
+    networkCalls++;
+    throw new Error("model-free probe forbids nonlocal or task fetch");
+  }
+  localApiCalls++;
+  return originalFetch(url, options);
 };
 core.GenerativeModel.prototype.streamGenerate = function () {
   modelCalls++;
@@ -43,37 +43,106 @@ const modelConfig = {
   default_model: { provider: "deepseek", model_id: "deepseek-flash" },
 };
 const firstHome = path.join(tmp, "original");
-await core.saveProjectConfig(firstHome, "synthetic", modelConfig);
+await core.saveProjectConfig(firstHome, "default_project", modelConfig);
 await core.createAgent({
   root: firstHome,
-  projectId: "synthetic",
+  projectId: "default_project",
   agentId: "target",
 });
-const original = path.join(firstHome, "synthetic/agents/target/agent_state");
+const original = path.join(firstHome, "default_project/agents/target/agent_state");
 for (const name of ["skills", "hooks", "memory", "schedule", ".vault.toml"])
   await fs.rm(path.join(original, name), { recursive: true, force: true });
-const configPath = path.join(original, "system_config.yaml");
-const doc = parseDocument(await fs.readFile(configPath, "utf8"));
-doc.setIn(["memory", "enabled"], false);
-doc.setIn(["hooks", "enabled"], false);
-await fs.writeFile(configPath, doc.toString());
-const stateGuide = await fs.readFile(
-  path.join(
-    source,
-    "plugins/evo-harness-rsi-toolkit/skills/evo-harness-rsi-toolkit/references/state.md",
-  ),
-  "utf8",
-);
-const documented = stateGuide.match(/```python\n([\s\S]*?)\n```/);
-if (!documented) throw new Error("native State budget setup snippet missing");
-execFileSync("python3", ["-", configPath], {
-  input:
-    "import sys\n" +
-    documented[1].replace(
-      'Path("<STATE>/system_config.yaml")',
-      "Path(sys.argv[1])",
-    ),
-});
+const helper = path.join(benchmark, "agents/penguin_agent/helper.mjs");
+const cli = path.join(built, "packages/cli/dist/penguin.js");
+const guard = path.join(tmp, "loopback-only.mjs");
+await fs.writeFile(guard, `import fs from "node:fs";
+const original = globalThis.fetch;
+globalThis.fetch = async (input, options = {}) => {
+  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+  const method = (options.method ?? input?.method ?? "GET").toUpperCase();
+  if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ||
+      !["GET", "PUT"].includes(method) || (method === "PUT" && !url.pathname.endsWith("/config"))) {
+    fs.appendFileSync(process.env.EVO_PROBE_HTTP, JSON.stringify({ blocked: true }) + "\\n");
+    throw Error("nonlocal/model/task request forbidden");
+  }
+  const response = await original(input, options);
+  fs.appendFileSync(process.env.EVO_PROBE_HTTP, JSON.stringify({ method, path: url.pathname, status: response.status }) + "\\n");
+  return response;
+};
+`);
+const apiChecks = [];
+async function nativeStateApi(root, mode) {
+  const httpLog = path.join(tmp, "http-" + mode + ".jsonl");
+  const env = { ...process.env, PENGUIN_HOME: root, PORT: "0", HOST: "127.0.0.1",
+    EVO_PROBE_HTTP: httpLog, NODE_OPTIONS: "--import " + guard };
+  for (const key of Object.keys(env)) if (/^(?:HTTP|HTTPS|ALL)_PROXY$/i.test(key)) delete env[key];
+  const log = await fs.open(path.join(tmp, "server-" + mode + ".log"), "w", 0o600);
+  const server = spawn(process.execPath, [cli, "server"], { cwd: tmp, env, stdio: ["ignore", log.fd, log.fd] });
+  await log.close();
+  const invoke = (...args) => JSON.parse(execFileSync(process.execPath, [helper, ...args],
+    { cwd: tmp, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  try {
+    const deadline = Date.now() + 60000;
+    let ready = false;
+    while (Date.now() < deadline) {
+      try { ready = invoke("ready", root, String(deadline), "default_project", "target").ready; } catch {}
+      if (ready) break;
+      if (server.exitCode !== null) throw Error("isolated native server exited during startup");
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (!ready) throw Error("isolated native API did not become ready");
+    if (mode === "prepare") {
+      const prepared = invoke("prepare-evo-state", root, "default_project", "target", "target");
+      if (!prepared.complete || prepared.max_turns !== -1 || prepared.required_output_chars !== 104192)
+        throw Error("native API fresh preparation failed");
+      const again = invoke("prepare-evo-state", root, "default_project", "target", "target");
+      if (!again.complete || again.changed) throw Error("prepared fresh State is not stable");
+      // Reproduce the old unconditional-PUT risk with a semantically identical
+      // CRLF form. This disposable diagnostic precedes the actual snapshot.
+      const yaml = path.join(root, "default_project/agents/target/agent_state/system_config.yaml");
+      const canonical = await fs.readFile(yaml, "utf8");
+      const crlf = canonical.replace(/\n/g, "\r\n");
+      await fs.writeFile(yaml, crlf);
+      const lock = JSON.parse(await fs.readFile(path.join(root, "server.lock"), "utf8"));
+      const token = (await fs.readFile(path.join(root, "api-token"), "utf8")).trim();
+      const response = await fetch(`http://localhost:${lock.port}/api/projects/default_project/agents/target/config`, {
+        method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ config: { maxTurns: -1 } }),
+      });
+      if (!response.ok || (await response.json()).config.maxTurns !== -1) throw Error("native no-op PUT reproduction failed");
+      const rewritten = await fs.readFile(yaml, "utf8");
+      if (rewritten === crlf || rewritten !== canonical) throw Error("native YAML normalization evidence differs");
+      apiChecks.push({ mode, prepared, repeated_preparation_changed: again.changed,
+        original_noop_put_rewrites_equivalent_yaml: true });
+    } else {
+      const beforeEvents = (await fs.readFile(httpLog, "utf8")).trim().split("\n").filter(Boolean).length;
+      let cap, rejected = false;
+      try { cap = invoke("set-max-turns", root, "default_project", "target", "-1"); }
+      catch (error) { rejected = true; cap = JSON.parse(error.stdout.toString()); }
+      if (mode.startsWith("restore") && (rejected || cap.changed || cap.action !== "unchanged")) throw Error("restored frozen turn cap was not a read-only match");
+      if (mode === "mismatch" && (!rejected || cap.changed || !String(cap.error).startsWith("frozen_state_max_turns_mismatch")))
+        throw Error("frozen mismatch was not refused");
+      const events = (await fs.readFile(httpLog, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse);
+      if (events.some(e => e.blocked) || events.slice(beforeEvents).some(e => e.method !== "GET"))
+        throw Error("frozen turn-cap verification wrote State or made an out-of-scope request");
+      apiChecks.push({ mode, cap, verification_get_only: true });
+    }
+  } finally {
+    try { execFileSync(process.execPath, [cli, "server", "stop", "--root", root], { cwd: tmp, env,
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 }); } catch {}
+    if (server.exitCode === null) await Promise.race([
+      new Promise(resolve => server.once("exit", resolve)), new Promise(resolve => setTimeout(resolve, 5000))]);
+    if (server.exitCode === null) {
+      server.kill("SIGTERM");
+      await Promise.race([new Promise(resolve => server.once("exit", resolve)),
+        new Promise(resolve => setTimeout(resolve, 5000))]);
+    }
+    if (server.exitCode === null) throw Error("isolated native server cleanup failed");
+    try { await fs.access(path.join(root,"server.lock")); throw Error("native server lock remained after cleanup"); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+}
+await nativeStateApi(firstHome, "prepare");
 const evo = path.join(
   source,
   "plugins/evo-harness-rsi-toolkit/skills/evo-harness-rsi-toolkit/scripts/evo.py",
@@ -86,7 +155,7 @@ from pathlib import Path
 spec=importlib.util.spec_from_file_location("probe_evo",sys.argv[1])
 evo=importlib.util.module_from_spec(spec);spec.loader.exec_module(evo)
 def entry(n):
-    return {"id":"boundary-guide","level":"general","trigger":"synthetic","scope":"synthetic",
+    return {"id":"boundary-guide","level":"general","trigger":"default_project","scope":"default_project",
             "body":("x"*79+"\\n")*(n//80)+"x"*(n%80)}
 low,high,best=1,16000,None
 while low<=high:
@@ -108,33 +177,55 @@ await fs.writeFile(
     output: skill,
   }),
 );
-execFileSync("python3", ["-B", evo, path.join(tmp, "export.json")]);
-const helper = path.join(benchmark, "agents/penguin_agent/helper.mjs");
 const inventory = (dir) =>
   JSON.parse(
     execFileSync(process.execPath, [helper, "state-files", dir], {
       encoding: "utf8",
     }),
   );
+await fs.writeFile(path.join(tmp,"empty-library.json"), "[]");
+await fs.writeFile(path.join(tmp,"empty-export.json"), JSON.stringify({op:"export",
+  library:path.join(tmp,"empty-library.json"),limits:{general:5,topic:5},max_bytes:16000,output:skill}));
+execFileSync("python3", ["-B", evo, path.join(tmp,"empty-export.json")]);
+const h0Before = inventory(original);
+const h0Transport = path.join(tmp,"h0-state.tar.gz");
+execFileSync("tar", ["-czf",h0Transport,"-C",original,"."]);
+const h0Home = path.join(tmp,"baseline");
+await core.saveProjectConfig(h0Home,"default_project",modelConfig);
+const h0State = path.join(h0Home,"default_project/agents/target/agent_state");
+await fs.mkdir(h0State,{recursive:true});
+execFileSync("tar", ["-xzf",h0Transport,"-C",h0State,"--no-same-owner"]);
+await nativeStateApi(h0Home,"restore_h0");
+const h0After = inventory(h0State);
+if (JSON.stringify(h0Before.files) !== JSON.stringify(h0After.files)) throw Error("H0 frozen State changed after native restore");
+await fs.rm(skill,{recursive:true});
+execFileSync("python3", ["-B", evo, path.join(tmp,"export.json")]);
 const before = inventory(original);
 const transport = path.join(tmp, "state.tar.gz");
 execFileSync("tar", ["-czf", transport, "-C", original, "."]);
 const secondHome = path.join(tmp, "installed");
-await core.saveProjectConfig(secondHome, "synthetic", modelConfig);
-const installed = path.join(secondHome, "synthetic/agents/target/agent_state");
+await core.saveProjectConfig(secondHome, "default_project", modelConfig);
+const installed = path.join(secondHome, "default_project/agents/target/agent_state");
 await fs.mkdir(installed, { recursive: true });
 execFileSync("tar", ["-xzf", transport, "-C", installed, "--no-same-owner"]);
 const extracted = inventory(installed);
 const imported = await core.createAgent({
   root: secondHome,
-  projectId: "synthetic",
+  projectId: "default_project",
   agentId: "target",
 });
-// Same parseDocument/setIn/toString path as native AgentConfigService maxTurns.
-const installedConfig = path.join(installed, "system_config.yaml");
-const normalized = parseDocument(await fs.readFile(installedConfig, "utf8"));
-normalized.setIn(["max_turns"], -1);
-await fs.writeFile(installedConfig, normalized.toString());
+await nativeStateApi(secondHome, "restore");
+const mismatchHome = path.join(tmp, "mismatch");
+await core.saveProjectConfig(mismatchHome, "default_project", modelConfig);
+const mismatchState = path.join(mismatchHome, "default_project/agents/target/agent_state");
+await fs.mkdir(mismatchState, { recursive: true });
+execFileSync("tar", ["-xzf", transport, "-C", mismatchState, "--no-same-owner"]);
+const mismatchConfig = path.join(mismatchState, "system_config.yaml");
+await fs.writeFile(mismatchConfig, (await fs.readFile(mismatchConfig, "utf8")).replace(/^max_turns: -1$/m, "max_turns: 32"));
+const mismatchBefore = inventory(mismatchState);
+await nativeStateApi(mismatchHome, "mismatch");
+const mismatchAfter = inventory(mismatchState);
+if (JSON.stringify(mismatchBefore.files) !== JSON.stringify(mismatchAfter.files)) throw Error("rejected frozen State was modified");
 const session = await imported.createSession({
   source: "cli",
   workspaceDir: tmp,
@@ -185,6 +276,11 @@ const report = {
   synthetic_only: true,
   model_calls: modelCalls,
   network_calls: networkCalls,
+  local_api_calls: localApiCalls,
+  native_api_checks: apiChecks,
+  frozen_mismatch_unchanged: true,
+  h0_native_restore_exact: true,
+  all_native_servers_stopped: true,
   native_file_count: Object.keys(before.files).length,
   archive_exact: equals(before, extracted),
   native_load_exact: equals(before, ready),

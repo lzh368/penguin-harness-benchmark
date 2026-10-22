@@ -23,6 +23,7 @@ class HelperReadinessTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.requests = []
+        self.request_bodies = []
         self.responses = []
         self.response_delay = 0
         test = self
@@ -33,8 +34,8 @@ class HelperReadinessTests(unittest.TestCase):
 
             def respond(self):
                 test.requests.append((self.command, self.path, self.headers.get("Authorization")))
-                if self.headers.get("Content-Length"):
-                    self.rfile.read(int(self.headers["Content-Length"]))
+                if int(self.headers.get("Content-Length", "0")):
+                    test.request_bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 status, body = test.responses.pop(0)
                 time.sleep(test.response_delay)
                 raw = body.encode() if isinstance(body, str) else json.dumps(body).encode()
@@ -160,14 +161,22 @@ class HelperReadinessTests(unittest.TestCase):
         self.assertTrue(all(method == "GET" for method, _, _ in self.requests))
 
     def test_target_second_get_uses_remaining_deadline(self):
-        self.responses = [(200, {"projects": [{"projectId": "project"}]}), (200, self.target())]
-        self.response_delay = 0.25
-        started = time.monotonic()
-        result, body = self.target_ready(int(time.time()*1000) + 450)
-        self.assertEqual(result.returncode, 1)
-        self.assertFalse(body["ready"])
-        self.assertEqual(len(self.requests), 2)
-        self.assertLess(time.monotonic() - started, 0.75)
+        # A synthetic clock checks the exact budget, independent of process
+        # startup or concurrent build load on the host.
+        preload = self.root/"remaining-budget.mjs"
+        record = self.root/"remaining-budget.json"
+        preload.write_text("import fs from 'node:fs'; let clock=1000; const budgets=[]; Date.now=()=>clock;\n" +
+            "AbortSignal.timeout=(ms)=>{budgets.push(ms); return new AbortController().signal;};\n" +
+            "globalThis.fetch=async(url)=>({status:200,json:async()=>{\n" +
+            "if(new URL(url).pathname==='/api/projects'){clock=1250;return {projects:[{projectId:'project'}]};}\n" +
+            "fs.writeFileSync(" + json.dumps(str(record)) + ",JSON.stringify(budgets)); return " + json.dumps(self.target()) + ";}});\n")
+        result = subprocess.run(["node", "--import", str(preload), str(HELPER), "ready", str(self.root),
+                                 "1450", "project", "fixture"], capture_output=True,text=True,timeout=3)
+        self.assertEqual(result.returncode,0)
+        self.assertTrue(json.loads(result.stdout)['ready'])
+        self.assertEqual(json.loads(record.read_text()),[450,200])
+        self.assertEqual(self.requests,[])
+        self.assertNotIn(TOKEN,result.stdout+result.stderr)
 
     def test_target_config_body_finishing_after_deadline_is_not_ready(self):
         preload = self.root/"slow-body.mjs"
@@ -182,38 +191,152 @@ class HelperReadinessTests(unittest.TestCase):
         self.assertEqual(self.requests,[])
         self.assertNotIn(TOKEN,result.stdout+result.stderr)
 
+    def fresh_state(self, prepared=False, role="target"):
+        view = self.target()
+        state = Path(view["stateDir"])
+        state.mkdir(parents=True, exist_ok=True)
+        (state/"system_config.yaml").write_text("version: 1\nmax_turns: -1\n")
+        view["config"] = {"version": 1, "maxTurns": -1 if prepared else 32,
+            "memory": {"enabled": not prepared}, "hooks": {"enabled": role == "trainer" if prepared else True},
+            "toolsBuiltin": [{"name":"exec_command", "maxOutputLength":104192 if prepared else 30000, "extra":"preserved"},
+                {"name":"input_command", "maxOutputLength":120000}, {"name":"read_file", "limit":2000}]}
+        return view
+
+    def test_native_preparation_preserves_whole_tool_array_and_reads_back(self):
+        before, after = self.fresh_state(), self.fresh_state(True)
+        self.responses = [(200,{"sessions":[]}), (200,before), (200,{}), (200,after)]
+        result, body = self.invoke("prepare-evo-state", "project", "fixture", "target")
+        self.assertEqual(result.returncode,0)
+        self.assertTrue(body["complete"])
+        self.assertEqual((body["model_calls"],body["task_requests"]),(0,0))
+        self.assertEqual([r[0] for r in self.requests],["GET","GET","PUT","GET"])
+        self.assertEqual(self.request_bodies,[{"config":{key:after["config"][key]
+            for key in ("maxTurns","memory","hooks","toolsBuiltin")}}])
+        self.assertEqual(body["native_tool_count"],3)
+        self.assertEqual(len(body["config_sha256"]),64)
+
+    def test_prepared_fresh_target_and_trainer_are_noop(self):
+        for role in ("target","trainer"):
+            with self.subTest(role=role):
+                view = self.fresh_state(True,role)
+                self.requests=[]; self.request_bodies=[]
+                self.responses=[(200,{"sessions":[]}),(200,view),(200,view)]
+                result, body=self.invoke("prepare-evo-state","project","fixture",role)
+                self.assertEqual(result.returncode,0)
+                self.assertFalse(body["changed"])
+                self.assertEqual(body["hooks_enabled"],role == "trainer")
+                self.assertTrue(all(r[0]=="GET" for r in self.requests))
+                self.assertEqual(self.request_bodies,[])
+
+    def test_preparation_refuses_existing_snapshot_before_http(self):
+        view=self.fresh_state(); snapshot=Path(view["stateDir"]).parent/"snapshots"/"1.tar.gz"
+        snapshot.parent.mkdir(); snapshot.write_bytes(b"SYNTHETIC immutable evidence")
+        result,body=self.invoke("prepare-evo-state","project","fixture","target")
+        self.assertEqual(result.returncode,1)
+        self.assertEqual(body["reason"],"existing_agent_evidence_cannot_be_reconfigured")
+        self.assertFalse(body["retryable"])
+        self.assertEqual(self.requests,[])
+        self.assertEqual(snapshot.read_bytes(),b"SYNTHETIC immutable evidence")
+
+    def test_preparation_refuses_sessions_or_nonfresh_or_incomplete_configuration(self):
+        for failure in ("session","version","tools"):
+            with self.subTest(failure=failure):
+                self.requests=[]; self.request_bodies=[]
+                view=self.fresh_state()
+                if failure=="version":view["config"]["version"]=2
+                if failure=="tools":view["config"]["toolsBuiltin"].pop(0)
+                self.responses=[(200,{"sessions":[{"sessionId":"prior"}] if failure=="session" else []}),(200,view)]
+                result,body=self.invoke("prepare-evo-state","project","fixture","target")
+                self.assertEqual(result.returncode,1)
+                self.assertFalse(body["complete"])
+                self.assertIn(body["reason"],("fresh_agent_required","native_fresh_state_required","complete_native_tool_configuration_required"))
+                self.assertTrue(all(r[0]=="GET" for r in self.requests))
+                self.assertEqual(self.request_bodies,[])
+
+    def test_preparation_never_retries_failed_put_or_accepts_unverified_update(self):
+        for failure in ("put","readback"):
+            with self.subTest(failure=failure):
+                self.requests=[];self.request_bodies=[]
+                before=self.fresh_state()
+                self.responses=[(200,{"sessions":[]}),(200,before)]
+                self.responses += [(503,TOKEN)] if failure=="put" else [(200,{}),(200,before)]
+                result,body=self.invoke("prepare-evo-state","project","fixture","target")
+                self.assertEqual(result.returncode,1)
+                self.assertFalse(body["complete"])
+                self.assertEqual(sum(r[0]=="PUT" for r in self.requests),1)
+                self.assertEqual(body["reason"],"preparation_update_failed" if failure=="put" else "preparation_mismatch")
+
     def test_config_update_is_one_put_and_successful_readback(self):
-        self.responses = [(200, {}), (200, {"config": {"maxTurns": -1}})]
+        self.responses = [(200, {"config": {"maxTurns": 32}}), (200, {}), (200, {"config": {"maxTurns": -1}})]
         result, body = self.invoke("set-max-turns", "synthetic", "fixture", "-1")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(body["max_turns"], -1)
-        self.assertEqual([method for method, _, _ in self.requests], ["PUT", "GET"])
+        self.assertEqual([method for method, _, _ in self.requests], ["GET", "PUT", "GET"])
         self.assertTrue(all(auth == "Bearer " + TOKEN for _, _, auth in self.requests))
+
+    def test_matching_stock_turn_cap_never_puts(self):
+        self.responses = [(200, {"config": {"maxTurns": -1}})]
+        result, body = self.invoke("set-max-turns", "synthetic", "fixture", "-1")
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(body["changed"])
+        self.assertEqual(body["action"], "unchanged")
+        self.assertEqual([method for method, _, _ in self.requests], ["GET"])
+
+    def test_frozen_evo_state_verifies_without_writing_or_refuses_mismatch(self):
+        state = self.root / "project/agents/fixture/agent_state"
+        marker = state / "skills/evo-harness-learned/SKILL.md"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("SYNTHETIC frozen Skill marker")
+        yaml = state / "system_config.yaml"
+        original = b"# SYNTHETIC exact frozen formatting\nmax_turns: -1\n"
+        yaml.write_bytes(original)
+        for current, exit_code in ((-1, 0), (32, 1)):
+            with self.subTest(current=current):
+                self.requests.clear()
+                self.responses = [(200, {"stateDir": str(state), "config": {"maxTurns": current}})]
+                result, body = self.invoke("set-max-turns", "project", "fixture", "-1")
+                self.assertEqual(result.returncode, exit_code)
+                self.assertTrue(body["frozen_state"])
+                self.assertFalse(body["changed"])
+                self.assertEqual(body["config_sha256_before"], body["config_sha256_after"])
+                self.assertEqual(yaml.read_bytes(), original)
+                self.assertEqual([method for method, _, _ in self.requests], ["GET"])
+                if exit_code:
+                    self.assertEqual(body["error"], "frozen_state_max_turns_mismatch_prepare_before_snapshot")
+
+    def test_unreadable_or_invalid_native_config_never_puts(self):
+        for response in ((503, "starting"), (200, {"config": {}}), (200, {"config": {"maxTurns": True}})):
+            with self.subTest(response=response):
+                self.requests.clear()
+                self.responses = [response]
+                result, body = self.invoke("set-max-turns", "project", "fixture", "-1")
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(body["changed"])
+                self.assertEqual([method for method, _, _ in self.requests], ["GET"])
 
     def test_failed_config_put_is_never_retried_or_accepted_by_readback(self):
         for status in (401, 403, 404, 503):
             with self.subTest(status=status):
                 self.requests.clear()
-                self.responses = [(status, "penguin-server is starting"),
-                                  (200, {"config": {"maxTurns": -1}})]
+                self.responses = [(200, {"config": {"maxTurns": 32}}), (status, "penguin-server is starting")]
                 result, body = self.invoke("set-max-turns", "synthetic", "fixture", "-1")
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(body["put_status"], status)
-                self.assertNotIn("max_turns", body)
-                self.assertEqual([method for method, _, _ in self.requests], ["PUT"])
+                self.assertEqual(body["max_turns"], 32)
+                self.assertEqual([method for method, _, _ in self.requests], ["GET", "PUT"])
 
-    def test_real_adapter_shell_waits_read_only_then_puts_and_submits_once(self):
+    def test_real_adapter_shell_waits_read_only_then_skips_matching_put_and_submits_once(self):
         # The real shell and real helper talk to a synthetic local API. The CLI
         # Task is a fixture only, so no Session or model request can be created.
         self.responses = [(200, {"projects": []}),
             (200, {"projects": [{"projectId": "project"}]}), (404, {}),
             (200, {"projects": [{"projectId": "project"}]}), (200, self.target()),
-            (200, {}), (200, self.target()),
+            (200, self.target()),
             (200, {"agents": [{"agentId": "fixture"}]}), (200, {"sessions": [self.session()]})]
         result, events = self.adapter_shell()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(events, ["task", "stop"])
-        self.assertEqual([m for m, _, _ in self.requests], ["GET"]*5 + ["PUT", "GET", "GET", "GET"])
+        self.assertEqual([m for m, _, _ in self.requests], ["GET"]*8)
         outcome = json.loads((self.root/"logs/penguin-outcome.json").read_text())
         self.assertTrue(outcome["server_ready"])
         self.assertEqual(outcome["status"], "completed")

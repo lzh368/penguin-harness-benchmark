@@ -27,9 +27,13 @@
 //   node helper.mjs verify-cost <session-cost.json> <model-cost.json>
 //       Checks both native cost responses are JSON group lists. Does not assert that
 //       every request is priced; the native hasUncosted fields remain authoritative.
+//   node helper.mjs prepare-evo-state <data root> <projectId> <agentId> <target|trainer>
+//       Configure one fresh version-1 Agent through the native API before any
+//       Session or snapshot. Fixed full-Skill output capacity, no task/model call.
 //   node helper.mjs set-max-turns <data root> <projectId> <agentId> <n>
-//       Sets the Agent's max_turns through the local server and reads it back. Prints one
-//       JSON line; exits 1 when the value read back differs.
+//       GET-only when already configured; refuses mismatched frozen Evo State.
+//       For ordinary stock State, permits one PUT plus readback when needed.
+//       Prints one JSON line and exits 1 on mismatch or unavailable verification.
 //   node helper.mjs redact <.project_config.toml> <dir>
 //       Replaces every api_key value found in the config with "[REDACTED]" in all regular
 //       files under <dir>. Prints one JSON line with counts; never prints a key.
@@ -409,28 +413,143 @@ async function api(root, method, apiPath, body) {
   return last;
 }
 
-// Sets the Agent's max_turns (system_config.yaml) through the Agent config API, which
-// changes that one key and keeps the rest of the stock config, then reads it back.
-// Exits non-zero unless the value read back is the one requested. Target readiness
-// must precede this operation. A failed/ambiguous mutation is never retried.
-async function setMaxTurns(root, projectId, agentId, value) {
-  const result = { requested: Number(value) };
-  const configPath = `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/config`;
+// Fixed fresh-State preparation, never a task or phase scheduler. The API
+// preserves the complete native tool table; no hand-rendered YAML is installed.
+async function prepareEvoState(root, projectId, agentId, role) {
+  const result = { schema: "evo-native-state-preparation-v1", complete: false,
+    role, max_bytes: 16000, required_output_chars: 104192, model_calls: 0, task_requests: 0 };
   try {
-    const put = await apiOnce(root, "PUT", configPath, { config: { maxTurns: Number(value) } });
-    result.put_status = put?.status ?? null;
-    await put?.body?.cancel();
-    if (put?.ok) {
-      const get = await apiOnce(root, "GET", configPath);
-      result.get_status = get?.status ?? null;
-      if (get?.ok) result.max_turns = (await get.json())?.config?.maxTurns ?? null;
-      else await get?.body?.cancel();
+    if (!validNativeId(projectId) || !validNativeId(agentId) || !["target", "trainer"].includes(role))
+      throw new Error("invalid_preparation_identity");
+    const agent = path.resolve(root, projectId, "agents", agentId), state = path.join(agent, "agent_state");
+    for (const name of ["snapshots", "traces", "sessions"]) {
+      const directory = path.join(agent, name);
+      if (fs.existsSync(directory) && (!fs.lstatSync(directory).isDirectory() ||
+          fs.realpathSync(directory) !== directory || fs.readdirSync(directory).length))
+        throw new Error("existing_agent_evidence_cannot_be_reconfigured");
     }
-  } catch {
-    result.error = "agent_config_update_unavailable";
+    const route = `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`;
+    const sessions = await apiOnce(root, "GET", route + "/sessions");
+    if (!sessions?.ok) { await sessions?.body?.cancel(); throw new Error("sessions_unavailable"); }
+    const listing = await sessions.json();
+    if (!Array.isArray(listing.sessions) || listing.sessions.length) throw new Error("fresh_agent_required");
+    const get = await apiOnce(root, "GET", route + "/config");
+    if (!get?.ok) { await get?.body?.cancel(); throw new Error("config_unavailable"); }
+    const current = await get.json(), config = current.config;
+    if (path.resolve(current.stateDir ?? "") !== state || config?.version !== 1 ||
+        !Array.isArray(config.toolsBuiltin)) throw new Error("native_fresh_state_required");
+    for (const name of ["exec_command", "input_command"]) {
+      const matches = config.toolsBuiltin.filter(tool => tool?.name === name);
+      if (matches.length !== 1 || !Number.isSafeInteger(matches[0].maxOutputLength) || matches[0].maxOutputLength < 1)
+        throw new Error("complete_native_tool_configuration_required");
+    }
+    const toolsBuiltin = config.toolsBuiltin.map(tool => ["exec_command", "input_command"].includes(tool?.name)
+      ? { ...tool, maxOutputLength: Math.max(tool.maxOutputLength, result.required_output_chars) } : tool);
+    const wanted = { maxTurns: -1, memory: { enabled: false }, hooks: { enabled: role === "trainer" }, toolsBuiltin };
+    const matches = cfg => cfg?.maxTurns === -1 && cfg?.memory?.enabled === false &&
+      cfg?.hooks?.enabled === wanted.hooks.enabled && JSON.stringify(cfg?.toolsBuiltin) === JSON.stringify(toolsBuiltin);
+    result.changed = !matches(config);
+    if (result.changed) {
+      const put = await apiOnce(root, "PUT", route + "/config", { config: wanted });
+      result.put_status = put?.status ?? null;
+      if (!put?.ok) { await put?.body?.cancel(); throw new Error("preparation_update_failed"); }
+      await put.body?.cancel();
+    }
+    const readback = await apiOnce(root, "GET", route + "/config");
+    if (!readback?.ok) { await readback?.body?.cancel(); throw new Error("preparation_readback_failed"); }
+    const after = await readback.json();
+    if (path.resolve(after.stateDir ?? "") !== state || !matches(after.config)) throw new Error("preparation_mismatch");
+    const yaml = path.join(state, "system_config.yaml");
+    if (!fs.lstatSync(yaml).isFile() || fs.realpathSync(yaml) !== yaml) throw new Error("invalid_state_config");
+    result.config_sha256 = fileSha(yaml);
+    result.max_turns = after.config.maxTurns;
+    result.memory_enabled = after.config.memory.enabled;
+    result.hooks_enabled = after.config.hooks.enabled;
+    result.native_tool_count = after.config.toolsBuiltin.length;
+    result.complete = true;
+  } catch (error) {
+    const safeReasons = new Set([
+      "invalid_preparation_identity", "existing_agent_evidence_cannot_be_reconfigured",
+      "sessions_unavailable", "fresh_agent_required", "config_unavailable",
+      "native_fresh_state_required", "complete_native_tool_configuration_required",
+      "preparation_update_failed", "preparation_readback_failed", "preparation_mismatch",
+      "invalid_state_config",
+    ]);
+    result.error = "native_evo_state_preparation_failed_no_task_started";
+    result.reason = safeReasons.has(error?.message) ? error.message : "native_api_or_filesystem_unavailable";
+    result.retryable = false;
   }
   out(result);
-  if (result.max_turns !== result.requested) process.exitCode = 1;
+  if (!result.complete) process.exitCode = 1;
+}
+
+// Read the effective native value before considering a mutation. An Evo State
+// is already frozen before Harbor transport: startup may verify it, never fix
+// a mismatch. For ordinary stock Agents retain the one-PUT setup behavior.
+async function setMaxTurns(root, projectId, agentId, value) {
+  const result = { requested: Number(value), changed: false };
+  const configPath = `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}/config`;
+  try {
+    if (!validNativeId(projectId) || !validNativeId(agentId) ||
+        !/^(?:-1|[1-9][0-9]*)$/.test(String(value)) || !Number.isSafeInteger(result.requested))
+      throw new Error("invalid_turn_cap_request");
+    const state = path.resolve(root, projectId, "agents", agentId, "agent_state");
+    const markers = ["skills/evo-harness-learned/SKILL.md", "skills/evo-harness-rsi-toolkit/training.json"];
+    result.frozen_state = markers.some(name => {
+      try {
+        const info = fs.lstatSync(path.join(state, name));
+        if (!info.isFile() || info.isSymbolicLink()) throw new Error("invalid_frozen_state_marker");
+        return true;
+      } catch (error) {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      }
+    });
+    const yaml = path.join(state, "system_config.yaml");
+    if (result.frozen_state) {
+      if (!fs.lstatSync(yaml).isFile() || fs.realpathSync(yaml) !== yaml) throw new Error("invalid_frozen_state_config");
+      result.config_sha256_before = fileSha(yaml);
+    }
+    const get = await apiOnce(root, "GET", configPath);
+    result.get_status = get?.status ?? null;
+    if (!get?.ok) {
+      await get?.body?.cancel();
+      result.error = "agent_config_read_unavailable";
+    } else {
+      const current = await get.json();
+      if (result.frozen_state && path.resolve(current?.stateDir ?? "") !== state)
+        throw new Error("frozen_state_identity_mismatch");
+      result.max_turns = current?.config?.maxTurns ?? null;
+      if (!Number.isSafeInteger(result.max_turns) || (result.max_turns !== -1 && result.max_turns < 1))
+        throw new Error("invalid_native_turn_cap");
+      if (result.max_turns === result.requested) {
+        result.action = "unchanged";
+      } else if (result.frozen_state) {
+        result.action = "refused";
+        result.error = "frozen_state_max_turns_mismatch_prepare_before_snapshot";
+      } else {
+        const put = await apiOnce(root, "PUT", configPath, { config: { maxTurns: result.requested } });
+        result.put_status = put?.status ?? null;
+        await put?.body?.cancel();
+        if (put?.ok) {
+          result.changed = true;
+          result.action = "updated";
+          const readback = await apiOnce(root, "GET", configPath);
+          result.readback_status = readback?.status ?? null;
+          if (readback?.ok) result.max_turns = (await readback.json())?.config?.maxTurns ?? null;
+          else { await readback?.body?.cancel(); result.error = "agent_config_readback_unavailable"; }
+        } else result.error = "agent_config_update_unavailable";
+      }
+    }
+    if (result.frozen_state) {
+      result.config_sha256_after = fileSha(yaml);
+      if (result.config_sha256_after !== result.config_sha256_before) result.error = "frozen_state_changed_during_verification";
+    }
+  } catch {
+    result.error = "agent_config_verification_unavailable";
+  }
+  out(result);
+  if (result.error || result.max_turns !== result.requested) process.exitCode = 1;
 }
 
 async function abort(root, sessionId, waitSeconds) {
@@ -684,6 +803,9 @@ switch (command) {
     break;
   case "verify-stop":
     verifyStop(args[0]);
+    break;
+  case "prepare-evo-state":
+    await prepareEvoState(args[0], args[1], args[2], args[3]);
     break;
   case "set-max-turns":
     await setMaxTurns(args[0], args[1], args[2], args[3]);

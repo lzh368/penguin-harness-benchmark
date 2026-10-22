@@ -76,7 +76,20 @@ cost means are not total experiment spend. Missing cells never become zero.
 Keep original verifier-defined missing/unparseable-answer zeroes unchanged.
 
 Initialize the H0 Target using Penguin's native CLI and the method's State
-reference. Copy its sanitized State into a separately created Trainer Agent
+reference. Before its first snapshot/Session, run the fixed native API preparation:
+
+```bash
+node agents/penguin_agent/helper.mjs prepare-evo-state "$PENGUIN_HOME" "$PROJECT" "$TARGET" target
+```
+
+This reads the complete native tool configuration, preserves every unrelated
+field, sets unlimited turns and disabled memory/hooks, and raises only the two
+command-output limits to at least 104192 characters. It refuses existing
+Sessions, snapshots, noninitial versions or incomplete tool tables; an already
+prepared fresh State requires no PUT. `trainer` mode is available only for a
+separately initialized fresh native Trainer; normal `prepare-trainer` copies
+the prepared H0 and installs its specified training hooks before snapshot.
+Copy the sanitized H0 State into a separately created Trainer Agent
 using prepare-trainer; snapshot both. The Trainer includes the method and the
 fixed training configuration. Test Target carries only the learned slot.
 The source method must already be natively installed in the Controller State;
@@ -194,12 +207,14 @@ Before declaring method completion, `verify-injection-matrix` binds each native
 cell to its unique original Harbor trial, task, model, verifier reward, duration
 and cost. It checks the actual installed State against the native snapshot;
 the adapter records file hashes after extraction, after native startup/turn-cap
-configuration and after shutdown. Freeze `max_turns: -1` and the full native
-command-output limits before transport: supported native loading/turn-cap setup
-is then byte-idempotent. All three complete State maps must equal the frozen
+verification and after shutdown. Freeze the native-API-prepared `max_turns: -1`
+and full command-output limits before transport. Matching startup is GET-only;
+a frozen Evo mismatch stops before a Task and cannot silently rewrite YAML.
+An unnecessary native PUT can reserialize equivalent YAML, so it is not used
+as a readiness check. All three complete State maps must equal the frozen
 snapshot; there is no blanket startup-rewrite exemption. Vault, memory and
 schedules are not read or retained by this inventory.
-Method revision `2026.10.22.3` exports exactly one runtime file: `SKILL.md`.
+Method revision `2026.10.22.4` exports exactly one runtime file: `SKILL.md`.
 It contains the fixed Reader, canonical inline metadata and every complete
 compiled general/topic procedure. There is no external index, selector, entry
 file, runtime shortlist or `max_entries` setting. Private compilation still
@@ -331,9 +346,13 @@ node experiments/gdpevo/evo-harness/v1/test_native_runtime.mjs \
   /absolute/path/to/built-penguin-checkout /absolute/path/to/native-state-output-probe.json
 ```
 
-It executes the method's documented field-only configuration recipe against a
-fresh native State, transports it through the real tar format and loads a native
-Session with network/model traps. A synthetic complete 16000-byte Skill is read
+It runs `prepare-evo-state` against a real compiled native HTTP server in a
+private temporary data root, with external/model/Task requests prohibited.
+It proves that an unnecessary native PUT can normalize equivalent YAML,
+that the prepared State needs no repeated PUT, and that restored matching
+States are GET-only while frozen mismatches fail without changing bytes.
+It then transports the State through the real tar format and loads a native
+Session with model traps. A synthetic complete 16000-byte Skill is read
 through actual native read_file and foreground cat, proving its full observation
 and unchanged State across transport. The retained 104192-character command
 output cap is conservative; the whole Skill budget remains 16000 UTF-8 bytes.

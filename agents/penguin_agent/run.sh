@@ -76,8 +76,9 @@ COST_STATUS="unavailable"
 PROCESS_CLEANUP="pending"
 CONFIG_READY="$SERVER_READY"
 EVO_TRAINING=false
-# Optional turn cap: the stock Agent's max_turns, set through the Agent config API. A
-# requested cap that cannot be applied skips the run instead of running uncapped.
+# Verify the requested native turn cap without rewriting an already matching
+# config. Frozen Evo State must match; only an ordinary stock State may be set
+# through one native API PUT. A mismatch/failure skips the Task.
 if [ "$SERVER_READY" = true ] && [ -n "${PB_MAX_TURNS:-}" ]; then
   if ! "$NODE" "$HELPER" set-max-turns "$PENGUIN_HOME" "$PB_PROJECT" "$PB_AGENT" "$PB_MAX_TURNS" \
     >"$OUT/penguin/max-turns.json" 2>&1; then

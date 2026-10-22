@@ -146,9 +146,10 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config):
     state = before["state"]
     require(ready["state"] == after["state"] == state, "trial State path changed")
     # A fresh native State freezes max_turns=-1 and the complete builtin tool
-    # table before transport. Actual SDK loading and the native maxTurns YAML
-    # update are byte-idempotent for this supported emitter shape (covered by
-    # the model-free native roundtrip probe). No startup rewrite is exempted.
+    # table through the native config API before transport. Startup verifies
+    # the matching turn cap with GET only and refuses a frozen mismatch; an
+    # unnecessary PUT may reserialize YAML even if the value is unchanged.
+    # No startup rewrite is exempted from this exact-byte comparison.
     require(ready["files"] == expected, "frozen State changed during native startup")
     require(ready["files"] == after["files"], "frozen State changed during held-out test")
     trace_root = trial / "agent/penguin/traces"
