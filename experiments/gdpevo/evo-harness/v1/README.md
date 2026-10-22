@@ -214,7 +214,7 @@ An unnecessary native PUT can reserialize equivalent YAML, so it is not used
 as a readiness check. All three complete State maps must equal the frozen
 snapshot; there is no blanket startup-rewrite exemption. Vault, memory and
 schedules are not read or retained by this inventory.
-Method revision `2026.10.22.4` exports exactly one runtime file: `SKILL.md`.
+Method revision `2026.10.22.5` exports exactly one runtime file: `SKILL.md`.
 It contains the fixed Reader, canonical inline metadata and every complete
 compiled general/topic procedure. There is no external index, selector, entry
 file, runtime shortlist or `max_entries` setting. Private compilation still
@@ -361,3 +361,13 @@ For offline checks against existing compiled dependencies, set
 checkout as the first argument. This does not substitute the new method source
 or install dependencies. Python controller fixtures use the same explicit
 variable solely to resolve the existing native YAML parser dependency.
+
+
+Revision `2026.10.22.5` keeps the R14 algorithm and dataset protocol. It moves
+already-required material observation checks before the actual training judge
+request, so an unread public input can be reported and read while the answer is
+still open, without issuing a score request. A recoverable, unsealed candidate
+format error returns a normal structured incomplete receipt; executed boundary
+violations remain failures. R14 trial evidence and original verdicts are retained.
+The training/test split, once-only actual judge, frozen answer, same-Solver
+reflection, one batch compilation and full-file held-out injection are unchanged.

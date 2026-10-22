@@ -254,13 +254,7 @@ class ExportEvidenceTests(unittest.TestCase):
                              "train_ids": self.train, "url": "http://127.0.0.1:9005/api/judge",
                              "answer": str(answer), "output": paths["output"]}
             judge_path = self.save(paths["judge_request"], judge_request)
-            with patch.object(self.evo.urllib.request, "build_opener") as opener:
-                response = opener.return_value.open.return_value.__enter__.return_value
-                response.status = 200
-                correct = getattr(self, "all_success", False)
-                response.read.return_value = json.dumps({"score": 1 if correct else 0.5,
-                                                         "correct": correct, "synthetic": True}).encode()
-                feedback = self.evo.judge(judge_request, str(judge_path))
+            correct = getattr(self, "all_success", False)
             fb = Path(paths["output"])
             session = f"synthetic-solver-{i}"
             binding = self.binding(session)
@@ -279,8 +273,20 @@ class ExportEvidenceTests(unittest.TestCase):
                     self.h0_skill.read_text().removesuffix("\n").split("\n"), 1)),
                 name="read_file", arguments={"file_path": str(self.h0_skill)})
             rows[3:3] = skill_read
-            rows += self.pair("synthetic-judge", json.dumps(self.evo.judge_stdout(feedback)), arguments={
-                "cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(judge_path)])})
+            # Supply the same original native history before invoking the real
+            # readiness gate; only the HTTP response is synthetic.
+            judge_call = self.pair("synthetic-judge", "", arguments={
+                "cmd": shlex.join(["python3", "-B", str(self.installed_helper), str(judge_path)])})[0]
+            rows.append(judge_call)
+            self.write_trace(trace, rows)
+            with patch.dict(os.environ, {"PENGUIN_SESSION_ID": session}), patch.object(self.evo.urllib.request, "build_opener") as opener:
+                response = opener.return_value.open.return_value.__enter__.return_value
+                response.status = 200
+                response.read.return_value = json.dumps({"score": 1 if correct else 0.5,
+                                                         "correct": correct, "synthetic": True}).encode()
+                feedback = self.evo.judge(judge_request, str(judge_path))
+            self.assertEqual(feedback["status"], "ok")
+            rows += self.pair("synthetic-judge", json.dumps(self.evo.judge_stdout(feedback)))[1:]
             for offset in range(0, max(len(fb.read_text()), 1), 4000):
                 read_request = self.save(Path(contract["request_dir"]) / f"feedback-{offset}.json",
                                          {"op": "read-material", "path": str(fb), "offset": offset})
