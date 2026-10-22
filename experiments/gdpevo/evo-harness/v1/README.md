@@ -437,3 +437,54 @@ Skill files with those names are retained. A snapshot containing excluded roots
 is rejected explicitly, not silently filtered or repaired. The live State
 comparison ignores only the native runtime roots omitted from transport. This
 is a new acceptance scope, not a claim that an old unfiltered snapshot passed.
+
+## Explicit historical replay (`2026.10.22.9`)
+
+`offline_replay.py` implements `evo-harness-offline-replay-v1` separately from the
+full training/H0 protocol above. The main Penguin reads the method's replay
+reference, runs five fresh learning children on hash-bound historical training
+bundles, then one Evolver. This is new learning from retained evidence, not
+continuation of the original Solver Session or a new valid full-RSI run. The
+source manifest records its original method/configuration and original-version
+training validation. Test answers, old candidates and generated Skills are not
+learning inputs; existing source runs, costs and audit conclusions stay intact.
+
+For the currently authorized scope, `test_repeats: 1`,
+`test_phase_order: ["final_test"]`, and `test_concurrency: 5` mean exactly five
+new Target trials after learning and freezing. There is no new training trial,
+baseline or automatic second/third round. General descriptions and this group's
+topic bodies retain the same loading policy and whole-package 16,000-byte cap.
+A valid empty compilation still runs these five final tests; this protocol does
+not invent/reuse a new H0 measurement. Reused historical baseline comparisons
+must identify their original version and independent acceptance status.
+
+The frozen config keeps the full runtime, task ids, adapter, source commits,
+bundle, public task/preflight and native deployment pins. Add `source_manifest`
+and its `source_manifest_sha256`, `limits: {"general": 5, "topic": 5}`,
+`max_bytes: 16000`, explicit paid authorization and a per-run budget no greater
+than $10. `test_agent_id` is the exact native Target id (optionally prefixed by
+`create:`). `test_benchmark_id` names this new test Benchmark; the distinct
+`benchmark_id` is an unused compatibility identity and is never registered or
+executed. The public zero-model preflight may check all six original container
+configurations; that does not represent a paid training run.
+
+Every request carries `config` and `config_sha256`. These operations prepare or
+validate only; none calls Harbor, spawns a role or advances the experiment:
+
+- `verify-source`: checks the frozen historical source through the same pinned
+  Penguin `replay.py`. Supply `evo_tool`, or the frozen `deployment.penguin_checkout`.
+- `prepare-benchmarks` / `verify-benchmarks`: create/check only the five original
+  test Cases, reusing native registration and exact launch/archive parameters.
+- `verify-freeze`: takes `evo_tool`, `learning_seal`, `initial_snapshot`,
+  `final_snapshot` (both native archive path strings) and `target_state`. It
+  revalidates the six original native learning-role traces and compilation,
+  binds the compiled package to the final native snapshot, and checks unchanged
+  runtime/configuration outside the learned Skill paths and version. The initial
+  empty snapshot is a configuration reference, not a measured baseline.
+- `verify-round` / `verify-test-matrix`: take `evo_tool`, `freeze_request` (the
+  prior request file), `round: 1` and `cells` (five native worker records). They
+  revalidate the freeze and bind every record to its original Harbor trial,
+  installed/before/ready/after State, exact case mapping, full loading trace,
+  runtime, reward, cleanup and cost. Missing cells remain incomplete. A valid
+  score with `cost: null` stays valid and pending; the native replay ledger
+  retains the reserve and also accounts for main/learning/worker costs.

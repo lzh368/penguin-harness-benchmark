@@ -40,7 +40,7 @@ class RegistrationTests(unittest.TestCase):
                         "api_host": "synthetic.invalid", "effective_reasoning_effort": "high", "client_type": "synthetic"},
             "api_host": "synthetic.invalid", "benchmark_id": "synthetic-train", "test_benchmark_id": "synthetic-test",
             "bundle_sha256": registration.sha(self.bundle), "image_manifest_sha256": registration.sha(image)})
-        self.config["versions"].update(penguin_commit="a" * 40, benchmark_commit="b" * 40, skill="2026.10.22.8")
+        self.config["versions"].update(penguin_commit="a" * 40, benchmark_commit="b" * 40, skill="2026.10.22.9")
         self.config["deployment"] = {"benchmark_checkout": str(self.repo), "penguin_home": str(self.project.parent),
             "project_id": self.project.name, "bundle": str(self.bundle), "bundle_sha256": self.config["bundle_sha256"],
             "image_manifest": str(image), "image_manifest_sha256": self.config["image_manifest_sha256"],
