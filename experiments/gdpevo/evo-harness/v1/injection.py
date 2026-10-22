@@ -70,7 +70,8 @@ def loading_files(frozen, evo, acceptance):
     reader = evo.parse_reader(files[acceptance.SLOT + "/SKILL.md"])
     required = {acceptance.SLOT + "/SKILL.md", *(entry["state_path"] for entry in reader["entries"]
                                                 if entry["load_mode"] == "body")}
-    forbidden = {entry["state_path"] for entry in reader["entries"] if entry["load_mode"] == "description"}
+    forbidden = {entry["state_path"] for entry in reader["entries"] if entry["load_mode"] == "description"
+                 and entry.get("body_storage") != "description-only"}
     return files, {path: files[path] for path in sorted(required)}, forbidden
 
 

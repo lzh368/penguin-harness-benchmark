@@ -123,10 +123,10 @@ class InjectionTests(unittest.TestCase):
                 "snapshot": str(self.snapshot), "runtime": self.runtime, "expected_version": 1, "benchmark": str(self.benchmark),
                 "config": str(registration.config_path), "config_sha256": protocol.sha(registration.config_path)}
 
-    def replace_library(self, entries):
+    def replace_library(self, entries, **options):
             save(self.library, entries)
             shutil.rmtree(self.state / acceptance.SLOT)
-            self.evo.export_skill({"library": str(self.library), "limits": {"general": 5, "topic": 5},
+            self.evo.export_skill({**options, "library": str(self.library), "limits": {"general": 5, "topic": 5},
                 "max_bytes": 16000, "output": str(self.state / acceptance.SLOT)})
             test_protocol.install_package(self.evo, self.state / acceptance.SLOT, self.state)
             with tarfile.open(self.snapshot, "w:gz") as archive:
@@ -245,6 +245,21 @@ class InjectionTests(unittest.TestCase):
         self.save_rows(rows[:-2] + self.extra_pair(rows, "exec_command", {"cmd": command}) + rows[-2:])
         with self.assertRaisesRegex(ValueError, "general Skill body"):
             protocol.execute(self.req)
+
+    def test_projected_general_file_exposes_only_description_and_does_not_add_body(self):
+        self.replace_library(protocol.read(self.library), general_storage="description-only")
+        rows = self.trace_rows()
+        state = rows[0]["payload"]["agent_state"]
+        manifest = self.evo.parse_reader(self.skill_raw())
+        item = next(v for v in manifest["entries"] if v["level"] == "general")
+        raw = self.frozen[item["state_path"]]
+        self.assertIn(b"SYNTHETIC_GENERAL_DESCRIPTION", raw)
+        self.assertNotIn(b"SYNTHETIC_GENERAL_BODY", b"".join(self.frozen.values()))
+        extra = self.extra_pair(rows, "exec_command", {"cmd": "cat " + state + "/" + item["state_path"] + " 2>/dev/null | head -60"}, raw.decode())
+        self.save_rows([*rows, *extra])
+        result = protocol.execute(self.req)
+        self.assertTrue(result["complete"])
+        self.assertNotIn(item["state_path"], result["loaded_skill_files"])
 
     def test_complete_matrix_binds_every_case_to_identical_full_skill_bytes(self):
         result = protocol.execute(self.req)
