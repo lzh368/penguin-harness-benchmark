@@ -43,7 +43,7 @@ class NativeRecordTests(unittest.TestCase):
         return injection.canonical_worker_cell(self.req, self.f.evo, acceptance)
 
     def test_latest_method_waits_for_original_job_after_terminal_trial(self):
-        self.f.config['versions']['skill'] = '2026.10.23.3'
+        self.f.config['versions']['skill'] = '2026.10.23.4'
         job = self.f.trials[0][0].parent
         test_injection.save(job / 'result.json', {'finished_at': None, 'stats': {'n_running_trials': 1}})
         self.assertTrue(self.run_record()['pending'])

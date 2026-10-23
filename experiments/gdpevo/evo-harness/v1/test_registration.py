@@ -86,7 +86,7 @@ class RegistrationTests(unittest.TestCase):
         self.save_config()
 
     def test_current_method_three_test_rounds_keep_training_one_execution(self):
-        self.config['versions']['skill'] = '2026.10.23.3'
+        self.config['versions']['skill'] = '2026.10.23.4'
         self.config.update(context_transport='agents-md-v1', reflection_evidence='observed-v1',
             receipt_policy='native-trial-v1', candidate_edit='native-draft-v1',
             solver_stage='bound-post-judge-v1', test_repeats=3)
