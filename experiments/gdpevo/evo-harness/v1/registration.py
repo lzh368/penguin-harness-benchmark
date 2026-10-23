@@ -174,6 +174,9 @@ def _files(config, checked, phase):
             argv.extend(["--ak", f"{key}={value}"])
         argv.extend(["--allow-agent-host", runtime["api_host"], "--agent-setup-timeout-multiplier", "2.5",
                      "-k", "1", "-n", "1", "--job-name", "<unique-job-name>", "-o", "<benchmark-jobs-dir>", "-y"])
+        if package is not None and config.get("resource_gate"):
+            gate = config["resource_gate"]
+            argv = ["python3", "-B", gate["script"], gate["policy"], "--", *argv]
         launch = {"schema": "evo-harbor-launch-v1", "task_id": task_id, "case_id": case_id,
                   "cwd": deploy["benchmark_checkout"], "environment": {"PYTHONPATH": adapter["python_path"],
                   "PATH_prefix": deploy["bin_dir"]}, "argv_template": argv, "runtime": runtime,
@@ -271,6 +274,8 @@ only the native evaluation retry policy may authorize a new pre-start attempt.
                 "learning method2026.10.23.6: five sequential train members once, one actual judge "
                 "per member and one batch compilation; repeated training allowed by the general "
                 "benchmark is not enabled. User-frozen model, limits and concurrency govern this run.\n\n"
+                "The registered argv already includes its resource-only queue when configured; "
+                "execute it exactly once and do not add a second resource wrapper.\n\n"
                 + files[f"{case_id}/statement/README.md"])
     return benchmark_id, files
 

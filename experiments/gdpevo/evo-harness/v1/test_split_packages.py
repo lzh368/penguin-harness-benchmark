@@ -19,7 +19,8 @@ class SplitPackageTests(unittest.TestCase):
         self.f.config.update(benchmark_layout="gdpevo-domain-packages-v1",
             context_transport="agents-md-v1", reflection_evidence="observed-v1",
             receipt_policy="native-trial-v1", candidate_edit="native-draft-v1",
-            solver_stage="bound-post-judge-v1", test_repeats=1)
+            solver_stage="bound-post-judge-v1", test_repeats=1,
+            resource_gate={"script":"/synthetic/queue.py", "policy":"/synthetic/policy.json"})
 
     def group(self, group):
         domain = protocol.DOMAINS[group]
@@ -53,6 +54,8 @@ class SplitPackageTests(unittest.TestCase):
                                          (original/case/"rubric/README.md").read_bytes())
                         launch = json.loads((installed/case/"statement/harbor-launch.json").read_bytes())
                         self.assertEqual(launch["source_package"]["id"], package_id)
+                        self.assertEqual(launch["argv_template"][:5],
+                            ["python3", "-B", "/synthetic/queue.py", "/synthetic/policy.json", "--"])
                         task_path = launch["argv_template"][launch["argv_template"].index("-p") + 1]
                         self.assertIn(f"benchmarks/gdpevo-{domain}/tasks/task_group_{group}/", task_path)
                         self.assertEqual(launch["solving_timeout_sec"], 21600 if phase == "training" else 14400)
