@@ -46,6 +46,24 @@ class RecompileTests(unittest.TestCase):
         self.assertEqual(result['conditions']['final']['three_round_mean'],80)
         self.assertEqual(len(result['conditions']['final']['cells']),15)
 
+    def test_export_repair_preserves_original_library_and_requires_no_evolver(self):
+        entries = [{'id':level,'level':level,'trigger':'Synthetic task','scope':'Synthetic only',
+                    'body':'PRIVATE_' + level,
+                    **({'topic':'example'}if level=='topic'else{'description':'Read supplied records and compute the requested field.'})}
+                   for level in ('general','topic')]
+        library = Path(save(self.root/'original-library.json',entries))
+        original = library.read_bytes()
+        manifest = {'kind':'export-repair-diagnostic-validation','source_library':str(library),
+                    'source_library_sha256':self.evo.digest(original)}
+        receipt = recompile_tools.compile_draft(manifest,self.evo,self.root/'reexported')
+        data = b''.join((self.root/'reexported/skill'/name).read_bytes()for name in receipt['files'])
+        self.assertNotIn(b'PRIVATE_general',data)
+        self.assertIn(b'PRIVATE_topic',data)
+        self.assertEqual(library.read_bytes(),original)
+        library.write_text('[]')
+        with self.assertRaises(AssertionError):
+            recompile_tools.compile_draft(manifest,self.evo,self.root/'tampered')
+
     def test_same_candidates_compile_with_private_general_body_and_full_topic(self):
         contexts = [save(self.root / (f'train_{n:03d}.json'), {'split': 'train', 'task_id': f'train_{n:03d}',
             'attempt_id': 'attempt-1', 'negative': n == 1, 'inputs': [], 'trace': {'pairs': []}}) for n in range(1, 6)]

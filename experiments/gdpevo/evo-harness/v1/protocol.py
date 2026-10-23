@@ -43,10 +43,10 @@ def helper(path):
 
 def validate_config(config, repo):
     require(config["protocol"] == "evo-harness-gdpevo-v1", "unknown protocol")
-    if config["versions"]["skill"] in ("2026.10.22.12", "2026.10.23.1", "2026.10.23.3", "2026.10.23.4", "2026.10.23.5", "2026.10.23.6", "2026.10.23.7"):
+    if config["versions"]["skill"] in ("2026.10.22.12", "2026.10.23.1", "2026.10.23.3", "2026.10.23.4", "2026.10.23.5", "2026.10.23.6", "2026.10.23.7", "2026.10.23.8"):
         require(config.get("context_transport") == "agents-md-v1" and config.get("reflection_evidence") == "observed-v1"
                 and config.get("receipt_policy") == "native-trial-v1", "new method requires its explicit protocol revision")
-    if config["versions"]["skill"] in ("2026.10.23.1", "2026.10.23.3", "2026.10.23.4", "2026.10.23.5", "2026.10.23.6", "2026.10.23.7"):
+    if config["versions"]["skill"] in ("2026.10.23.1", "2026.10.23.3", "2026.10.23.4", "2026.10.23.5", "2026.10.23.6", "2026.10.23.7", "2026.10.23.8"):
         require(config.get("candidate_edit") == "native-draft-v1"
                 and config.get("solver_stage") == "bound-post-judge-v1", "new draft permissions require native Solver stage enforcement")
     group = config["group"]
@@ -165,7 +165,7 @@ def prepare_trainer(req):
                     "host_operation_id": req["host_operation_id"], "config_sha256": req["config_sha256"],
                     "compilation_reserve_sec": config["compilation_reserve_sec"],
                     "solving_timeout_sec": checked["tasks"][0]["solving_timeout_sec"]}
-        for key in ("context_transport", "reflection_evidence", "receipt_policy", "candidate_edit", "solver_stage"):
+        for key in ("context_transport", "reflection_evidence", "receipt_policy", "candidate_edit", "solver_stage", "general_storage"):
             if key in config:
                 training[key] = config[key]
         require(training["compilation_reserve_sec"] < training["solving_timeout_sec"], "invalid compilation reserve")
@@ -321,10 +321,16 @@ def verify_export(req):
     require(reflected == read(candidate_path), "candidate concatenation differs from original Solver reflection outputs")
     for binding in [c["trace"]["binding"] for c in contexts] + [a["binding"] for a in audits]:
         require(all(binding[k] == req["runtime"][k] for k in ("provider", "model_id")), "frozen runtime mismatch")
+    policies = {read(path_map[c["feedback"]["training_path"]]).get("general_storage", "full")
+                if c["feedback"].get("source") == "evo-judge" else "full" for c in contexts}
+    require(len(policies) == 1, "export storage differs between frozen training profiles")
+    storage = policies.pop()
+    require(record.get("general_storage", "full") == storage
+            and req.get("general_storage", storage) == storage, "export storage differs from frozen training")
     evo.verify_compilation({"train_ids": req["train_ids"], "contexts": [str(private_file(record["members"][t]["context_file"])) for t in req["train_ids"]],
         "candidates": str(candidate_path), "decisions": str(decisions_path), "library": str(library_path),
         "limits": record["limits"], "max_bytes": record["max_bytes"],
-        "skill": str(submission / "skill"), "path_map": path_map})
+        "skill": str(submission / "skill"), "path_map": path_map, "general_storage": storage})
     package = evo.validate_package(submission / "skill")
     require(package["sha256"] == record["skill_sha256"], "export fingerprint mismatch")
     return package

@@ -47,6 +47,13 @@ def modules(m):
 
 
 def compile_draft(m, evo, directory):
+    if m.get('kind') == 'export-repair-diagnostic-validation':
+        assert evo.digest(Path(m['source_library']).read_bytes()) == m['source_library_sha256']
+        library = Path(directory) / 'library.json'
+        library.parent.mkdir(parents=True, exist_ok=True)
+        library.write_bytes(Path(m['source_library']).read_bytes())
+        return evo.export_skill({'library': str(library), 'limits': {'general': 5, 'topic': 5},
+            'max_bytes': 16000, 'general_storage': 'description-only', 'output': str(Path(directory) / 'skill')})
     contexts = {(v['task_id'], v['attempt_id']): v for v in map(read, m['context_paths'])}
     assert len(contexts) == 5 and all(v['split'] == 'train' for v in contexts.values())
     req = {'candidates': m['candidates'], 'library': m['empty_library'],
@@ -125,7 +132,8 @@ def original_child(m, evo, control):
 def main(workspace, op, args):
     workspace = Path(workspace).resolve()
     m = read(workspace / 'manifest.json')
-    assert m['workspace'] == str(workspace) and m['kind'] == 'training-recompilation-diagnostic-validation'
+    assert m['workspace'] == str(workspace) and m['kind'] in (
+        'training-recompilation-diagnostic-validation', 'export-repair-diagnostic-validation')
     evo, control, protocol, acceptance = modules(m)
     assert all(evo.digest(Path(path).read_bytes()) == sha for path, sha in m['source_hashes'].items()), 'frozen source changed'
     c = read(m['config'])
@@ -147,13 +155,16 @@ def main(workspace, op, args):
     if op == 'publish':
         if (workspace / 'freeze.json').exists():
             return {'complete': True, 'freeze': read(workspace / 'freeze.json'), 'already_published': True}
-        session, view = original_child(m, evo, control)
-        seal = read(workspace / 'evolver-seal.json')
-        assert seal['session_id'] == session and seal['sha256'] == evo.digest(Path(m['decisions']).read_bytes())
-        assert any(seal.items() <= value.items() for pair in view['pairs']
-                   for value in evo.json_values(pair['observation']['payload'].get('output', '')) if isinstance(value, dict)), 'original seal observation missing'
+        session, view, seal = None, {'sources': []}, None
+        if m['kind'] == 'training-recompilation-diagnostic-validation':
+            session, view = original_child(m, evo, control)
+            seal = read(workspace / 'evolver-seal.json')
+            assert seal['session_id'] == session and seal['sha256'] == evo.digest(Path(m['decisions']).read_bytes())
+            assert any(seal.items() <= value.items() for pair in view['pairs']
+                       for value in evo.json_values(pair['observation']['payload'].get('output', '')) if isinstance(value, dict)), 'original seal observation missing'
         package = compile_draft(m, evo, workspace / 'compiled')
-        assert package['sha256'] == seal['package_sha256']
+        if seal is not None:
+            assert package['sha256'] == seal['package_sha256']
         prior = read(m['old_freeze'])
         initial = acceptance.snapshot(prior['h0_snapshot'])['files']
         state = Path(prior['target_state'])
