@@ -670,7 +670,9 @@ class PenguinAgent(BaseInstalledAgent):
             command=(
                 f"mkdir -p {state_dir} && tar -xzf {remote} -C {state_dir} --no-same-owner && "
                 f"rm -f {state_dir}/.vault.toml {remote} && mkdir -p {logs} && "
-                f"(cd {state_dir} && find . -type f | sort) > {logs}/penguin-agent-state.txt"
+                f"(cd {state_dir} && find . -type f | sort) > {logs}/penguin-agent-state.txt && "
+                f"{NODE_DIR}/bin/node {PREFIX}/helper.mjs state-files {state_dir} "
+                f"> {logs}/penguin-agent-state-before.json"
             ),
         )
 
@@ -792,6 +794,14 @@ class PenguinAgent(BaseInstalledAgent):
             metadata["exit_code"] = outcome.get("exit_code")
             metadata["timed_out"] = bool(outcome.get("timed_out"))
             metadata["server_ready"] = bool(outcome.get("server_ready"))
+            if "native_sessions_idle" in outcome:
+                metadata["native_sessions_idle"] = outcome["native_sessions_idle"] is True
+            if "cost_status" in outcome:
+                metadata["cost_status"] = outcome["cost_status"]
+            if "process_cleanup" in outcome:
+                metadata["process_cleanup"] = outcome["process_cleanup"]
+            if outcome.get("cost_status") == "unsettled":
+                metadata["cost_complete"] = False
             status = outcome.get("status")
             metadata["status"] = "timeout" if outcome.get("timed_out") else status
 
@@ -800,6 +810,10 @@ class PenguinAgent(BaseInstalledAgent):
             cache_write = sum(_int(g.get("cacheWrite")) for g in by_session)
             output = sum(_int(g.get("output")) for g in by_session)
             cost, partial, complete = _cost(by_session)
+            # An interrupted cleanup cannot turn a partial/stale usage file into
+            # a final price. Retain observed tokens and the priced partial sum.
+            if metadata.get("native_sessions_idle") is False or metadata.get("cost_status") == "unsettled":
+                cost, complete = None, False
             context.n_cache_tokens = cache_read
             context.n_input_tokens = cache_read + cache_write
             context.n_output_tokens = output
