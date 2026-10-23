@@ -16,8 +16,9 @@ class NativeRecordTests(unittest.TestCase):
         self.f.setUp()
         self.addCleanup(self.f.doCleanups)
         f = self.f
-        f.config["versions"]["skill"] = "2026.10.22.12"
-        f.config.update(context_transport="agents-md-v1", receipt_policy="native-trial-v1", reflection_evidence="observed-v1")
+        f.config["versions"]["skill"] = "2026.10.23.6"
+        f.config.update(context_transport="agents-md-v1", receipt_policy="native-trial-v1", reflection_evidence="observed-v1",
+                        candidate_edit="native-draft-v1", solver_stage="bound-post-judge-v1")
         f.evo.install_context({"state": str(f.state)})
         with tarfile.open(f.snapshot, "w:gz") as handle:
             handle.add(f.state, arcname="agent_state")
@@ -33,6 +34,9 @@ class NativeRecordTests(unittest.TestCase):
             rows = [r for r in rows if r.get("payload", {}).get("tool_call_id", "").startswith("answer")
                     or r.get("type") != "model_msg"]
             trace.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        for trial, _ in f.trials:
+            terminal = protocol.read(trial / "result.json")["finished_at"]
+            test_injection.save(trial.parent / "result.json", {"finished_at": terminal, "stats": {"n_running_trials": 0}})
         cell = f.cells[0]
         self.identity = {k: cell[k] for k in ("agent_id", "expected_version", "provider", "model_id", "thinking_level", "case_id", "run")}
         self.req = {"identity": self.identity, "session_id": cell["session_id"], "benchmark": str(f.benchmark),
@@ -42,17 +46,19 @@ class NativeRecordTests(unittest.TestCase):
     def run_record(self):
         return injection.canonical_worker_cell(self.req, self.f.evo, acceptance)
 
-    def test_latest_method_waits_for_original_job_after_terminal_trial(self):
-        self.f.config['versions']['skill'] = '2026.10.23.4'
+    def test_latest_methods_wait_for_original_job_and_keep_native_audit(self):
         job = self.f.trials[0][0].parent
-        test_injection.save(job / 'result.json', {'finished_at': None, 'stats': {'n_running_trials': 1}})
-        self.assertTrue(self.run_record()['pending'])
         trial = protocol.read(self.f.trials[0][0] / 'result.json')
-        test_injection.save(job / 'result.json', {'finished_at': trial['finished_at'], 'stats': {'n_running_trials': 0}})
-        record = self.run_record()
-        self.assertFalse(record['pending'])
-        self.assertEqual(record['cell']['score'], 50)
-        self.assertTrue(record['audit']['audit_passed'])
+        for version in ('2026.10.23.4', '2026.10.23.5', '2026.10.23.6'):
+            with self.subTest(version=version):
+                self.f.config['versions']['skill'] = version
+                test_injection.save(job / 'result.json', {'finished_at': None, 'stats': {'n_running_trials': 1}})
+                self.assertTrue(self.run_record()['pending'])
+                test_injection.save(job / 'result.json', {'finished_at': trial['finished_at'], 'stats': {'n_running_trials': 0}})
+                record = self.run_record()
+                self.assertFalse(record['pending'])
+                self.assertEqual(record['cell']['score'], 50)
+                self.assertTrue(record['audit']['audit_passed'])
 
     def test_empty_general_body_set_does_not_inspect_local_cat_formatting(self):
         inspection = self.f.evo.inspection

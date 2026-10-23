@@ -43,10 +43,10 @@ def helper(path):
 
 def validate_config(config, repo):
     require(config["protocol"] == "evo-harness-gdpevo-v1", "unknown protocol")
-    if config["versions"]["skill"] in ("2026.10.22.12", "2026.10.23.1", "2026.10.23.3", "2026.10.23.4"):
+    if config["versions"]["skill"] in ("2026.10.22.12", "2026.10.23.1", "2026.10.23.3", "2026.10.23.4", "2026.10.23.5", "2026.10.23.6"):
         require(config.get("context_transport") == "agents-md-v1" and config.get("reflection_evidence") == "observed-v1"
                 and config.get("receipt_policy") == "native-trial-v1", "new method requires its explicit protocol revision")
-    if config["versions"]["skill"] in ("2026.10.23.1", "2026.10.23.3", "2026.10.23.4"):
+    if config["versions"]["skill"] in ("2026.10.23.1", "2026.10.23.3", "2026.10.23.4", "2026.10.23.5", "2026.10.23.6"):
         require(config.get("candidate_edit") == "native-draft-v1"
                 and config.get("solver_stage") == "bound-post-judge-v1", "new draft permissions require native Solver stage enforcement")
     group = config["group"]

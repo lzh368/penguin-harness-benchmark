@@ -102,6 +102,20 @@ class RegistrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_prepare()
 
+    def test_method_v6_requires_unchanged_context_and_solver_stage_contracts(self):
+        self.config['versions']['skill'] = '2026.10.23.6'
+        self.config.update(context_transport='agents-md-v1', reflection_evidence='observed-v1',
+            receipt_policy='native-trial-v1', candidate_edit='native-draft-v1',
+            solver_stage='bound-post-judge-v1', test_repeats=3)
+        self.save_config()
+        self.run_prepare()
+        for name in ('solver_stage', 'context_transport'):
+            previous = self.config.pop(name)
+            self.save_config()
+            with self.assertRaises(ValueError):
+                self.run_prepare()
+            self.config[name] = previous
+
     def test_realistic_dependency_inventory_above_old_limit_registers_with_pins(self):
         manifest = copy.deepcopy(self.bundle_meta)
         manifest["payload"] = {"files": {
