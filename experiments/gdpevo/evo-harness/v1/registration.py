@@ -150,7 +150,7 @@ def _files(config, checked, phase):
     # TOML JSON strings are compatible basic strings; fixed fields carry no private inputs.
     files = {"benchmark_config.toml": (
         f"id = {json.dumps(benchmark_id)}\ntitle = {json.dumps('Evo-Harness GDPevo ' + config['group'] + ' ' + phase)}\n"
-        f"version = {json.dumps(config['versions']['skill'])}\nstatus = \"published\"\nruns = 1\n\n[origin]\nkind = \"agent\"\n")}
+        f"version = {json.dumps(config['versions']['skill'])}\nstatus = \"published\"\nruns = {1 if phase == 'training' else config['test_repeats']}\n\n[origin]\nkind = \"agent\"\n")}
     tasks = checked["tasks"][:1] if phase == "training" else checked["tasks"][1:]
     for (case_id, task_id), task in zip(case_roster(config)[phase].items(), tasks, strict=True):
         argv = [deploy["uvx"], "--from", "harbor==" + config["harbor_version"], "harbor", "run",

@@ -42,6 +42,18 @@ class NativeRecordTests(unittest.TestCase):
     def run_record(self):
         return injection.canonical_worker_cell(self.req, self.f.evo, acceptance)
 
+    def test_latest_method_waits_for_original_job_after_terminal_trial(self):
+        self.f.config['versions']['skill'] = '2026.10.23.3'
+        job = self.f.trials[0][0].parent
+        test_injection.save(job / 'result.json', {'finished_at': None, 'stats': {'n_running_trials': 1}})
+        self.assertTrue(self.run_record()['pending'])
+        trial = protocol.read(self.f.trials[0][0] / 'result.json')
+        test_injection.save(job / 'result.json', {'finished_at': trial['finished_at'], 'stats': {'n_running_trials': 0}})
+        record = self.run_record()
+        self.assertFalse(record['pending'])
+        self.assertEqual(record['cell']['score'], 50)
+        self.assertTrue(record['audit']['audit_passed'])
+
     def test_all_five_contexts_identical_and_canonical_parameters_not_worker_guesses(self):
         f = self.f
         hashes = []

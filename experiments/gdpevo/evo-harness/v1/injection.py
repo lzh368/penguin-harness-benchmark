@@ -109,7 +109,7 @@ def _trial(trial, cell, frozen, req, evo, acceptance, launch, config, *, audit_p
     replay_policy = (config.get("protocol") == "evo-harness-offline-replay-v1"
             and config.get("audit_policy") == "record-only" and config["versions"]["skill"] == "2026.10.22.10")
     full_policy = (config.get("protocol") == "evo-harness-gdpevo-v1"
-            and config.get("receipt_policy") == "native-trial-v1" and config["versions"]["skill"] in ("2026.10.22.12", "2026.10.23.1"))
+            and config.get("receipt_policy") == "native-trial-v1" and config["versions"]["skill"] in ("2026.10.22.12", "2026.10.23.1", "2026.10.23.3"))
     require(not diagnostic or replay_policy or full_policy,
             "record-only requires an explicitly frozen diagnostic policy")
     audit_issues = []
@@ -397,7 +397,7 @@ def canonical_worker_cell(req, evo, acceptance):
     result = read(trial / "result.json")
     if not result.get("finished_at"):
         return {"pending": True, "reason": "original Harbor trial is still running"}
-    if config["versions"]["skill"] == "2026.10.23.1":
+    if config["versions"]["skill"] in ("2026.10.23.1", "2026.10.23.3"):
         spec = importlib.util.spec_from_file_location("evo_worker_job", Path(__file__).with_name("worker_job.py"))
         worker_job = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker_job)

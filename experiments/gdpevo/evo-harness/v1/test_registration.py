@@ -85,6 +85,23 @@ class RegistrationTests(unittest.TestCase):
         self.save_preflight()
         self.save_config()
 
+    def test_current_method_three_test_rounds_keep_training_one_execution(self):
+        self.config['versions']['skill'] = '2026.10.23.3'
+        self.config.update(context_transport='agents-md-v1', reflection_evidence='observed-v1',
+            receipt_policy='native-trial-v1', candidate_edit='native-draft-v1',
+            solver_stage='bound-post-judge-v1', test_repeats=3)
+        self.save_config()
+        self.run_prepare()
+        import tomllib
+        train = tomllib.loads((self.output / self.config['benchmark_id'] / 'benchmark_config.toml').read_text())
+        test = tomllib.loads((self.output / self.config['test_benchmark_id'] / 'benchmark_config.toml').read_text())
+        self.assertEqual(train['runs'], 1)
+        self.assertEqual(test['runs'], 3)
+        self.config.pop('solver_stage')
+        self.save_config()
+        with self.assertRaises(ValueError):
+            self.run_prepare()
+
     def test_realistic_dependency_inventory_above_old_limit_registers_with_pins(self):
         manifest = copy.deepcopy(self.bundle_meta)
         manifest["payload"] = {"files": {
