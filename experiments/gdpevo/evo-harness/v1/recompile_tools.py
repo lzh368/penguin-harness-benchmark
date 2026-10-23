@@ -85,7 +85,14 @@ def original_child(m, evo, control):
     # annotations are not consumed; yield_time_ms only changes the wait window.
     functional = {'prompt', 'prompt_file', 'prompt_sha256', 'agent_id',
                   'provider', 'model_id', 'thinking_level', 'run_in_background'}
-    semantic = lambda value: {k: v for k, v in value.items() if k in functional}
+    def semantic(value):
+        result = {k: v for k, v in value.items() if k in functional}
+        # Native run_subagent omitting agent_id self-spawns the parent Agent.
+        # Explicitly naming that same Agent has the same input and State; a
+        # different Agent remains a functional identity mismatch.
+        if m.get('controller_id'):
+            result.setdefault('agent_id', m['controller_id'])
+        return result
     links = []
     for parent in sorted(root.rglob(launch['sessionId'] + '*.jsonl')):
         parent_rows = [json.loads(line) for line in parent.read_text().splitlines() if line]

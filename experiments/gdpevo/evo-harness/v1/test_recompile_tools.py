@@ -84,7 +84,7 @@ class RecompileTests(unittest.TestCase):
         write_rows(child1,[{'type':'session_meta','payload':childmeta},{'type':'model_msg','payload':{'type':'text','role':'user','sender':'parent_agent','text':prompt}}])
         write_rows(child2,[{'type':'session_meta','payload':childmeta},{'type':'model_msg','payload':{'type':'tool_call','name':'write_file','arguments':'{}','tool_call_id':'write'}},
             {'type':'model_msg','payload':{'type':'tool_call_output','tool_call_id':'write','output':'SYNTHETIC written','stop_reason':'completed'}}])
-        m={'workspace':str(self.root),'trace_root':str(traces),'evolver_prompt':str(prompt_path),'evolver_call':save(self.root/'evolver-call.json',call),'runtime':runtime}
+        m={'controller_id':'parent-agent','workspace':str(self.root),'trace_root':str(traces),'evolver_prompt':str(prompt_path),'evolver_call':save(self.root/'evolver-call.json',call),'runtime':runtime}
         save(self.root/'launch-receipt.json',{'sessionId':'parent'})
         session,view=recompile_tools.original_child(m,self.evo,self.control)
         self.assertEqual(session,'child');self.assertEqual(len(view['sources']),2);self.assertEqual(len(view['pairs']),1)
@@ -92,6 +92,9 @@ class RecompileTests(unittest.TestCase):
         rows=[json.loads(line)for line in parent.read_text().splitlines()]
         actual={**call,'description':'原生显示标签','description_note':'display only',
                 'description_note_placeholder':'ignored by frozen native tool','yield_time_ms':1000}
+        rows[1]['payload']['arguments']=json.dumps(actual);write_rows(parent,rows)
+        self.assertEqual(recompile_tools.original_child(m,self.evo,self.control)[0],'child')
+        actual['agent_id']='parent-agent'
         rows[1]['payload']['arguments']=json.dumps(actual);write_rows(parent,rows)
         self.assertEqual(recompile_tools.original_child(m,self.evo,self.control)[0],'child')
         for key,value in [('prompt_sha256','0'*64),('thinking_level','low'),('agent_id','other'),('model_id','wrong')]:
