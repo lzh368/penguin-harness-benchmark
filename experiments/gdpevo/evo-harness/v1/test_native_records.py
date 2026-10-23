@@ -54,6 +54,19 @@ class NativeRecordTests(unittest.TestCase):
         self.assertEqual(record['cell']['score'], 50)
         self.assertTrue(record['audit']['audit_passed'])
 
+    def test_empty_general_body_set_does_not_inspect_local_cat_formatting(self):
+        inspection = self.f.evo.inspection
+        for command in ('cat -A /tmp/calc.py', 'cat -n /tmp/calc.py'):
+            call = {'name': 'exec_command', 'arguments': json.dumps({'cmd': command})}
+            injection.reject_general_body_reads([(call, {})], set(), '/app', inspection)
+
+    def test_known_forbidden_general_body_still_rejected(self):
+        inspection = self.f.evo.inspection
+        path = '/native/skills/general-method/SKILL.md'
+        call = {'name': 'read_file', 'arguments': json.dumps({'file_path': path})}
+        with self.assertRaises(injection.GeneralBodyRead):
+            injection.reject_general_body_reads([(call, {})], {path}, '/app', inspection)
+
     def test_all_five_contexts_identical_and_canonical_parameters_not_worker_guesses(self):
         f = self.f
         hashes = []

@@ -82,6 +82,8 @@ def reject_general_body_reads(pairs, forbidden, workspace, inspection):
     not substring matching of documentation or echoed paths. The cooperative
     trace policy does not claim to sandbox obfuscated arbitrary programs.
     """
+    if not forbidden:
+        return
     for call, _ in pairs:
         if call.get("name") == "read_file":
             args = json.loads(call["arguments"])
