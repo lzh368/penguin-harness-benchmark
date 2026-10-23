@@ -49,7 +49,7 @@ class NativeRecordTests(unittest.TestCase):
     def test_latest_methods_wait_for_original_job_and_keep_native_audit(self):
         job = self.f.trials[0][0].parent
         trial = protocol.read(self.f.trials[0][0] / 'result.json')
-        for version in ('2026.10.23.4', '2026.10.23.5', '2026.10.23.6'):
+        for version in ('2026.10.23.4', '2026.10.23.5', '2026.10.23.6', '2026.10.23.7'):
             with self.subTest(version=version):
                 self.f.config['versions']['skill'] = version
                 test_injection.save(job / 'result.json', {'finished_at': None, 'stats': {'n_running_trials': 1}})
